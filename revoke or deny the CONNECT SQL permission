@@ -1,0 +1,45 @@
+You’re getting Error 33129 because the login "AD\Group_Name" is a Windows group login, and SQL Server does not allow ALTER LOGIN ... DISABLE for Windows groups.
+
+The fix is to revoke or deny the CONNECT SQL permission instead of disabling the login.
+
+Why This Happens
+ALTER LOGIN ... DISABLE works only for:
+
+SQL logins
+
+Individual Windows user logins
+
+For Windows group logins, SQL Server expects you to control access via:
+
+CONNECT SQL permission at the server level
+
+Or removal of the login entirely
+
+Resolution Options
+
+Option 1 – Revoke CONNECT SQL
+This removes the ability for the Windows group to connect, without deleting it.
+
+
+USE master;
+GO
+REVOKE CONNECT SQL FROM [AD_GROUP_OR_USER_NAME];
+
+
+Option 2 – Deny CONNECT SQL
+This explicitly denies connection to the SQL instance for that Windows group (overrides grants).
+
+
+USE master;
+GO
+DENY CONNECT SQL TO  [AD_GROUP_OR_USER_NAME];
+
+
+Option 3 – Remove the Login Completely
+If you don’t need this Windows group in SQL Server at all:
+
+USE master;
+GO
+DROP LOGIN  [AD_GROUP_OR_USER_NAME];
+
+NOTE:  ⚠ This will break access for all members of that AD group if they are not explicitly granted access via other logins.
