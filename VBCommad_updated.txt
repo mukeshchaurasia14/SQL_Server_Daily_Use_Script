@@ -1,0 +1,3 @@
+cscript SQLInstalls.vbs scriptoutput.txt
+
+--Find " package DOES NOT exist in the Installer cache " in the scriptoutput.txt and Run the Copy Command
