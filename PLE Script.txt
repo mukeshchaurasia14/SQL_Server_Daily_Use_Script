@@ -1,0 +1,36 @@
+-- Page Life Expectancy Query for SQL Server
+SELECT 
+    [object_name],
+    [counter_name],
+    [cntr_value] AS [Page Life Expectancy]
+FROM 
+    sys.dm_os_performance_counters
+WHERE 
+    [object_name] LIKE '%Buffer Manager%'
+    AND [counter_name] = 'Page life expectancy';
+
+
+---------------------------------------------------------------------
+
+-- Check PLE is enable or not 
+
+
+	    SELECT [object_name], [counter_name], [cntr_value]
+
+    FROM sys.dm_os_performance_counters
+
+    WHERE [counter_name] = 'Page life expectancy';
+
+
+-------------------------------------------------------------------------------
+
+	SELECT getdate(), dosm.total_physical_memory_kb,   
+       dosm.available_physical_memory_kb,   
+       dosm.system_memory_state_desc  
+FROM sys.dm_os_sys_memory dosm;  
+  
+
+SELECT getdate(), dopm.physical_memory_in_use_kb,   
+       dopm.process_physical_memory_low,   
+       dopm.process_virtual_memory_low  
+FROM sys.dm_os_process_memory dopm;  

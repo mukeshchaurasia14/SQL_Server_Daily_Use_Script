@@ -1,0 +1,39 @@
+DECLARE @linkedServerName SYSNAME;
+DECLARE @result INT;
+
+-- Temp table to store results
+CREATE TABLE #ConnectivityResults (
+    LinkedServer SYSNAME,
+    Status VARCHAR(50),
+    TestTime DATETIME DEFAULT GETDATE()
+);
+
+-- Cursor to loop through all linked servers
+DECLARE linked_server_cursor CURSOR FOR
+SELECT name FROM sys.servers WHERE is_linked = 1;
+
+OPEN linked_server_cursor;
+FETCH NEXT FROM linked_server_cursor INTO @linkedServerName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        EXEC @result = sys.sp_testlinkedserver @linkedServerName;
+        INSERT INTO #ConnectivityResults (LinkedServer, Status)
+        VALUES (@linkedServerName, 'Connected');
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #ConnectivityResults (LinkedServer, Status)
+        VALUES (@linkedServerName, 'Failed');
+    END CATCH;
+
+    FETCH NEXT FROM linked_server_cursor INTO @linkedServerName;
+END
+
+CLOSE linked_server_cursor;
+DEALLOCATE linked_server_cursor;
+
+-- Show results
+SELECT * FROM #ConnectivityResults;
+
+DROP TABLE #ConnectivityResults;

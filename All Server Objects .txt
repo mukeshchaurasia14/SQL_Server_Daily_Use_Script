@@ -1,0 +1,26 @@
+-- Linked Servers
+SELECT 'LinkedServer' AS ObjectType, *
+FROM sys.servers
+WHERE server_id != 0;
+
+-- Endpoints
+SELECT 'Endpoint' AS ObjectType, *
+FROM sys.endpoints;
+
+-- Server Triggers
+SELECT 'ServerTrigger' AS ObjectType, *
+FROM sys.server_triggers;
+
+-- Credentials
+SELECT 'Credential' AS ObjectType, *
+FROM sys.credentials;
+
+-- Server Audits
+SELECT 'ServerAudit' AS ObjectType, *
+FROM sys.server_audits;
+
+-- Server Permissions
+SELECT 'ServerPermission' AS ObjectType, pr.name AS PrincipalName, pr.type_desc, pe.*
+FROM sys.server_permissions pe
+JOIN sys.server_principals pr 
+    ON pe.grantee_principal_id = pr.principal_id;

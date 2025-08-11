@@ -1,0 +1,110 @@
+MOnitoring Database M903PRD1  MSSQL_CENTRAL
+---------------------------------------------------------------------------------------------------------------------------
+--> To Check the Status of each SQL Server Database Service and Agent Service run the below query on registered server:
+
+set nocount on
+CREATE TABLE #ServicesStatus
+(
+myid int identity(1,1),
+serverName nvarchar(100) default @@serverName,
+serviceName varchar(100),
+Status varchar(50),
+checkdatetime datetime default (getdate())
+)
+INSERT #ServicesStatus (Status)
+EXEC xp_servicecontrol N'QUERYSTATE',N'MSSQLServer'
+update #ServicesStatus set serviceName = 'MSSQLServer' where myid = @@identity
+INSERT #ServicesStatus (Status)
+EXEC xp_servicecontrol N'QUERYSTATE',N'SQLServerAGENT'
+update #ServicesStatus set serviceName = 'SQLServerAGENT' where myid = @@identity
+select @@servername,serviceName, Status, checkdatetime from #ServicesStatus
+--select char(13)
+--select char(13)
+drop table #ServicesStatus
+
+-------------------------------------------------------------------------------------------------------
+--> Database Status
+
+use master
+go  
+select serverproperty ('servername') as [Instance Name],
+name as [Database Name],state_desc as [Status] ,user_access_desc as [User Access Desc],
+case is_auto_close_on
+when 1 then 'ON'
+when 0 then 'OFF'
+end as [Auto Close]
+from sys.databases
+
+---------------------------------------------------------------------------------------------------------
+-->AlwaysOn Database Services 
+
+SELECT
+dbname.name,
+gp.primary_recovery_health_desc,
+gp.secondary_recovery_health_desc,
+ag.role_desc,
+ag.connected_state_desc,
+db.database_state_desc,
+ag.synchronization_health_desc,
+db.synchronization_state_desc
+from sys.dm_hadr_availability_replica_states ag,
+sys.sysdatabases dbname,
+sys.dm_hadr_database_replica_states db,
+sys.dm_hadr_availability_group_states gp
+WHERE ag.replica_id=db.replica_id
+and ag.group_id=gp.group_id
+AND db.database_id=dbname.dbid
+AND db.database_state_desc IS NOT NULL
+------------------------------------------------------------------------------------------------------------
+--> Check Daily Backup All server (prd, uat, dev)
+
+select serverproperty ('servername'),a.name, case b.type
+       when 'D' then 'Full Database Backup'  
+               when 'I' THEN 'Differential Backup'  
+       WHEN 'L' THEN 'Log Backup'  
+   END AS Backup_Type,  
+ max(b.backup_finish_date) LastSuccessfulBackup,
+cast((getdate() - max(b.backup_finish_date)) as numeric(8, 2)) IntervalInDays
+from master..sysdatabases a
+LEFT OUTER JOIN msdb..backupset b ON a.name = b.database_name
+where a.name not in ('master','msdb','model','tempdb','DBA_Maintenance') group by a.name, b.type
+order by a.name, b.type
+--------------------------------------------------------------------------------------------------------------
+--> To check the Database Mail status for each Database Instance
+
+Exec msdb.dbo.sysmail_help_status_sp
+--------------------------------------------------------------------------------------------------------------
+--> To check Mirroring status
+
+SELECT DB_NAME(database_id),      
+      mirroring_role_desc,       
+      mirroring_state_desc, 
+      mirroring_witness_state_desc,
+      mirroring_witness_name     
+      FROM sys.database_mirroring       
+      WHERE mirroring_guid IS NOT NULL 
+--------------------------------------------------------------------------------------------------------------
+--> Enable TDE database lable encryption
+
+SELECT @@SERVERNAME ,DB_NAME(database_id)
+  ,encryption_state = CASE 
+    WHEN encryption_state = 1
+      THEN 'Unencrypted'
+    WHEN encryption_state = 2
+      THEN 'Encryption in progress'
+    WHEN encryption_state = 3
+      THEN 'Encrypted'
+    WHEN encryption_state = 4
+      THEN 'Key change in progress'
+    WHEN encryption_state = 5
+      THEN 'Decryption in progress'
+    WHEN encryption_state = 6
+      THEN 'Protection change in progress'
+    WHEN encryption_state = 0
+      THEN 'No database encryption key present, no encryption'
+    END
+  ,create_date
+  ,encryptor_type
+FROM sys.dm_database_encryption_keys
+--------------------------------------------------------------------------------------------------------------------
+Send an email to 'OS-IS-SD-HCL-ODCOPS', copying 'OS-IS-SD-HCL-SQL@brisbane.qld.gov.au' with an excel created from the above output.

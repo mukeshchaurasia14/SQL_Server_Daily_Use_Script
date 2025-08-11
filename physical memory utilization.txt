@@ -1,0 +1,3 @@
+ sqlserver_start_time,
+    sqlserver_total_physical_memory_kb / 1024 AS [SQL Server Total Physical Memory (MB)],
+    sqlserver_physical_memory_in_use_kb / 1024 AS [SQL Server Physical Memory in Use (MB)]

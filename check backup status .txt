@@ -1,0 +1,27 @@
+USE msdb;
+GO
+
+SELECT
+    bs.database_name AS DatabaseName,
+    CASE 
+        WHEN bs.type = 'D' THEN 'Database'
+        WHEN bs.type = 'L' THEN 'Log'
+        WHEN bs.type = 'I' THEN 'Differential'
+        ELSE 'Other'
+    END AS BackupType,
+    bs.backup_start_date AS BackupStartDate,
+    bs.backup_finish_date AS BackupFinishDate,
+    DATEDIFF(MINUTE, bs.backup_start_date, bs.backup_finish_date) AS BackupDurationMinutes,
+    bmf.physical_device_name AS BackupFile,
+    bs.position AS BackupPosition,
+    bs.backup_size / 1024 / 1024 AS BackupSizeMB,
+    bs.recovery_model AS RecoveryModel,
+    bs.user_name AS BackupTakenBy
+FROM 
+    backupset AS bs
+INNER JOIN 
+    backupmediafamily AS bmf
+ON 
+    bs.media_set_id = bmf.media_set_id
+ORDER BY 
+    bs.backup_finish_date DESC;

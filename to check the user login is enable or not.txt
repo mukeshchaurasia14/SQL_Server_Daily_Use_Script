@@ -1,0 +1,8 @@
+SELECT 
+    name AS LoginName,
+    is_disabled,
+    CASE is_disabled
+        WHEN 1 THEN 'Disabled'
+        ELSE 'Enabled'
+    END AS Status
+FROM sys.sql_logins;

@@ -1,0 +1,39 @@
+---cHECK cURRENT sTATE OF dATABASE
+SELECT 
+    name,
+    state_desc,
+    user_access_desc,
+    is_in_standby,
+    is_read_only
+FROM sys.databases
+WHERE name = 'OP_BCLP';
+
+
+-----Check Blocking Session 
+
+SELECT 
+    session_id,
+    blocking_session_id,
+    wait_type,
+    wait_time,
+    last_wait_type,
+    status,
+    command,
+    text
+FROM sys.dm_exec_requests
+CROSS APPLY sys.dm_exec_sql_text(sql_handle)
+WHERE database_id = DB_ID('OP_BCLP');
+
+--- If database is stuck in Restore Mode then complete the resotre
+
+RESTORE DATABASE OP_BCLP WITH RECOVERY;
+
+
+--- if database is offline 
+
+ALTER DATABASE OP_BCLP SET ONLINE;
+
+
+---
+
+

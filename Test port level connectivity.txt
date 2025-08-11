@@ -1,0 +1,45 @@
+⚡ Option 1: Test Port-Level TCP Connectivity (Only)
+Uses Test-NetConnection to check if port 1433 is open on multiple hosts.
+
+powershell
+# List of SQL Server hostnames or IPs
+$servers = @("sql1.company.local", "sql2.company.local", "192.168.1.50")
+
+# Target TCP port for SQL Server
+$port = 1433
+
+foreach ($server in $servers) {
+    $result = Test-NetConnection -ComputerName $server -Port $port
+    Write-Host "$server → Port $port" `
+        "Reachable:" $result.TcpTestSucceeded `
+        "Latency:" $result.PingReplyDetails.RoundtripTime "ms"
+}
+🧠 This just tests network access to the port—doesn’t confirm SQL Server is accepting logins.
+
+✅ Option 2: Test SQL Login Success per Host
+Uses .NET's SqlConnection to check actual connection success.
+
+powershell
+# Replace with your SQL credentials
+$username = "your_sql_login"
+$password = "your_password"  # Or prompt securely with Read-Host -AsSecureString
+
+# List of target servers or instances
+$servers = @("sql1.company.local", "sql2.company.local", "192.168.1.50")
+
+foreach ($server in $servers) {
+    $connStr = "Server=$server;Database=master;User ID=$username;Password=$password;Connection Timeout=5"
+    $sqlConnection = New-Object System.Data.SqlClient.SqlConnection $connStr
+
+    try {
+        $sqlConnection.Open()
+        Write-Host "$server → ✅ SQL connection successful" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "$server → ❌ Failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    finally {
+        $sqlConnection.Close()
+    }
+}
+🔐 For secure credentials, consider using Get-Credential or encrypted credential storage via Export-Clixml.

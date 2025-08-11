@@ -1,0 +1,33 @@
+SELECT 
+    DB_NAME(database_id) AS DatabaseName,
+    name AS LogicalName,
+    type_desc AS FileType,
+    physical_name AS PhysicalName,
+    size / 128.0 AS SizeMB,
+    max_size / 128.0 AS MaxSizeMB,
+    growth / 128.0 AS GrowthMB,
+    is_percent_growth AS IsPercentGrowth
+FROM 
+    sys.master_files
+ORDER BY 
+    DatabaseName, type_desc;
+
+
+
+SELECT 
+    name AS DatabaseName,
+    collation_name AS CollationName
+FROM 
+    sys.databases
+ORDER BY 
+    name;
+
+
+
+SELECT 
+    name AS DatabaseName,
+    compatibility_level AS CompatibilityLevel
+FROM 
+    sys.databases
+ORDER BY 
+    name;

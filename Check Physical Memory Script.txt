@@ -1,0 +1,36 @@
+-------------Physical memory -----------
+
+Select total_physcial_memory_kb/1024 [Total physical memory in MB],
+ available_physical_memory_kb/1024 [physcial memory available in MB], system _memory_state_desc
+From sys.dm_os_sys_memory;
+
+
+
+
+
+---------Physical memory use , virtual memory use----------
+Select physical_memory_in_use_kb/1024 [physical memory used in MB], process_physical_memory_low [physical memory low],
+process_virtual_memory_low [virtual memory low]
+From sys.dm_os_process_memory;
+
+
+
+
+-------Target Memory--------
+Select committed_kb/1024 [sql server committed memory in MB], 
+committed_target_kb/1024 [sql server target committed memory in MB]
+From sys.dm_os_sys_info;
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Check physical memory utilization.
+----------------------------------
+
+This is in reference to INC000003232472. The respective steps have been successfully performed and were in accordance with the Doer Checker guidelines. 
+
+I, “Ashok Pal” (Checker) was in sync with “Abdul Wase” (Doer) during the course of the steps in Production environment.
+
+INSTALLATION PLAN (High Level Steps)
+1.	Open the server
+2.	Check for the server memory 
+3.	Check for services if any one is utilisation high memory

@@ -1,0 +1,6 @@
+netstat -ano	List all active connections and ports.
+`netstat -an	find "LISTENING"`
+`netstat -ano	find ":1433"`
+`tasklist	find "PID"`
+netsh interface ipv4 show excludedportrange protocol=tcp	Show reserved port ranges.
+telnet <server> <port>	Test if a port is open on a remote server.

@@ -1,0 +1,24 @@
+-----CSR create----
+[e:
+E:\>cd \temp
+E:\>temp\ File path (.inf file + location where you want to create CSR file) + enter
+]
+
+
+Check csr file:-
+https://www.digicert.com/ssltools/view-csr/
+
+
+SQL_Update: We have renew the certificate for M731dev1 as per INC000003169990.
+
+
+certreq -new m642dev1.inf E:\Temp\m642dev1.ad.bcc.qld.gov.au.csr
+
+certreq -new m868cluat1.inf E:\Temp\m868cluat1.ad.bcc.qld.gov.au.csr
+
+certreq -new m868cluat2.inf E:\Temp\m868cluat2.ad.bcc.qld.gov.au.csr
+
+certreq -new m677dev1.inf E:\Temp\m677dev1.ad.bcc.qld.gov.au.csr
+
+
+thanks for 

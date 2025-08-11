@@ -1,0 +1,6 @@
+ALTER SERVER ROLE [dbcreator] ADD MEMBER [ibasetag_owner]
+GO
+
+ALTER SERVER ROLE [dbcreator] DROP MEMBER [ibasetag_owner]
+GO
+

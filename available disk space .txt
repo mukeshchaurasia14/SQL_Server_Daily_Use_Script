@@ -1,0 +1,48 @@
+1. EXEC xp_fixeddrives;
+
+
+
+2. you can use a combination of SQL Server functions and Windows Management Instrumentation (WMI) via the xp_cmdshell extended stored procedure. First, ensure xp_cmdshell is enabled:
+
+-- Enable xp_cmdshell if it is not already enabled
+EXEC sp_configure 'show advanced options', 1;
+RECONFIGURE;
+EXEC sp_configure 'xp_cmdshell', 1;
+RECONFIGURE;
+
+-----Create new table for disk information 
+
+
+CREATE TABLE #DiskInfo (
+    Drive char(1),
+    TotalSizeMB bigint,
+    FreeSpaceMB bigint
+);
+
+INSERT INTO #DiskInfo (Drive, TotalSizeMB, FreeSpaceMB)
+EXEC xp_cmdshell 'wmic logicaldisk get name,size,freespace /format:csv';
+
+-- Clean up the table to remove unnecessary rows and format the data
+DELETE FROM #DiskInfo WHERE Drive IS NULL OR Drive = 'Name';
+
+-- Select the formatted results
+SELECT 
+    Drive,
+    CAST(TotalSizeMB AS bigint) / 1048576 AS TotalSizeGB,
+    CAST(FreeSpaceMB AS bigint) / 1048576 AS FreeSpaceGB,
+    (CAST(TotalSizeMB AS bigint) - CAST(FreeSpaceMB AS bigint)) / 1048576 AS UsedSpaceGB
+FROM 
+    #DiskInfo;
+
+-- Drop the temporary table
+DROP TABLE #DiskInfo;
+
+
+This script retrieves the drive letter, total size in gigabytes, free space in gigabytes, and used space in gigabytes for each disk drive on the server.
+
+## Remember to disable 'xp_cmdshell'
+
+-- Disable xp_cmdshell
+EXEC sp_configure 'xp_cmdshell', 0;
+RECONFIGURE;
+

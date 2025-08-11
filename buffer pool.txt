@@ -1,0 +1,36 @@
+-- Total Buffer Pool Size
+SELECT 
+    physical_memory_in_use_kb / 1024 AS PhysicalMemoryInUseMB,
+    large_page_allocations_kb / 1024 AS LargePageAllocationsMB,
+    locked_page_allocations_kb / 1024 AS LockedPageAllocationsMB,
+    total_virtual_address_space_kb / 1024 AS TotalVirtualAddressSpaceMB,
+    virtual_address_space_reserved_kb / 1024 AS VirtualAddressSpaceReservedMB,
+    virtual_address_space_committed_kb / 1024 AS VirtualAddressSpaceCommittedMB,
+    virtual_address_space_available_kb / 1024 AS VirtualAddressSpaceAvailableMB,
+    page_fault_count AS PageFaultCount,
+    memory_utilization_percentage AS MemoryUtilizationPercentage,
+    available_commit_limit_kb / 1024 AS AvailableCommitLimitMB,
+    shared_memory_committed_kb / 1024 AS SharedMemoryCommittedMB,
+    shared_memory_reserved_kb / 1024 AS SharedMemoryReservedMB
+FROM 
+    sys.dm_os_process_memory;
+
+-- Buffer Pool Usage
+SELECT 
+    cntr_value AS BufferCacheAvailablePages
+FROM 
+    sys.dm_os_performance_counters
+WHERE 
+    object_name = 'SQLServer:Buffer Manager'
+    AND counter_name = 'Free pages';
+
+-- Memory Clerk Usage
+SELECT 
+    type AS ClerkType,
+    pages_kb / 1024 AS MemoryUsageMB
+FROM 
+    sys.dm_os_memory_clerks
+WHERE 
+    pages_kb > 0
+ORDER BY 
+    pages_kb DESC;

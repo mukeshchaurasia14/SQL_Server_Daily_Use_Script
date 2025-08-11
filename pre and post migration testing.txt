@@ -1,0 +1,416 @@
+1.-- Get memory information
+SELECT 
+    total_physical_memory_kb / 1024 AS TotalPhysicalMemoryMB,
+    available_physical_memory_kb / 1024 AS AvailablePhysicalMemoryMB,
+    system_memory_state_desc AS MemoryState
+FROM sys.dm_os_sys_memory;
+
+
+2-- Get CPU utilization
+SELECT 
+    scheduler_id,
+    cpu_id,
+    load_factor AS LoadFactor,
+    status,
+    is_online,
+    current_tasks_count AS CurrentTasksCount,
+    runnable_tasks_count AS RunnableTasksCount,
+    work_queue_count AS WorkQueueCount
+FROM sys.dm_os_schedulers
+WHERE status = 'VISIBLE ONLINE';
+
+
+-- 3. List of Databases with Status
+SELECT
+    name AS [Database Name],
+    state_desc AS [Database State],
+    recovery_model_desc AS [Recovery Model],
+    compatibility_level AS [Compatibility Level],
+    create_date AS [Creation Date]    
+FROM sys.databases
+ORDER BY name;
+
+
+-- 4. List of Tables and Row Count in Each Database
+DECLARE @DBName NVARCHAR(128);
+DECLARE @SQL NVARCHAR(MAX);
+-- Create a temporary table to store the results
+CREATE TABLE #TableRowCounts (
+    DatabaseName NVARCHAR(128),
+    TableName NVARCHAR(128),
+    Row_Count BIGINT
+);
+DECLARE db_cursor CURSOR FOR
+SELECT name 
+FROM sys.databases 
+WHERE state_desc = 'ONLINE';
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DBName;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @SQL = '
+    USE [' + @DBName + '];
+    INSERT INTO #TableRowCounts (DatabaseName, TableName, Row_Count)
+    SELECT ''' + @DBName + ''', t.NAME, SUM(p.[Rows])
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0, 1) -- 0 = Heap, 1 = Clustered index
+    GROUP BY t.NAME;
+    ';
+    EXEC sp_executesql @SQL;
+    FETCH NEXT FROM db_cursor INTO @DBName;
+END;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+-- Display the results
+SELECT * FROM #TableRowCounts ORDER BY DatabaseName, TableName;
+-- Clean up
+DROP TABLE #TableRowCounts;
+
+
+-- 5. Database Files Location
+SELECT 
+    db.name AS DatabaseName,
+    mf.name AS FileName,
+    mf.physical_name AS FilePath
+FROM sys.master_files mf
+INNER JOIN sys.databases db ON mf.database_id = db.database_id
+ORDER BY db.name, mf.physical_name;
+
+---6. Disk space information
+EXEC xp_fixeddrives;
+
+
+----7. SQL Server database size information
+A. 
+SELECT 
+    DB_NAME(database_id) AS DatabaseName, 
+    SUM(size * 8 / 1024) AS SizeMB
+FROM sys.master_files
+GROUP BY DB_NAME(database_id);
+ 
+
+--8. Check IP Address
+SELECT DISTINCT
+    local_net_address AS [Local IP Address]
+FROM sys.dm_exec_connections
+WHERE local_net_address IS NOT NULL
+ORDER BY local_net_address;
+
+select distinct local_net_address, local_tcp_port from sys.dm_exec_connections where local_net_address is not null
+
+
+
+----9. Check Last night backup of database
+SELECT  
+    SERVERPROPERTY('servername') AS ServerName, 
+    a.name AS DatabaseName,  
+    CASE  
+        WHEN b.type = 'D' THEN 'Full Database Backup'    
+        WHEN b.type = 'I' THEN 'Differential Backup'    
+        WHEN b.type = 'L' THEN 'Log Backup'    
+    END AS Backup_Type,    
+    MAX(b.backup_finish_date) AS LastSuccessfulBackup,  
+    CAST(DATEDIFF(DAY, MAX(b.backup_finish_date), GETDATE()) AS NUMERIC(8, 2)) AS IntervalInDays  
+FROM  
+    master..sysdatabases a  
+LEFT OUTER JOIN  
+    msdb..backupset b  
+    ON a.name = b.database_name  
+WHERE  
+    b.type IN ('D', 'I', 'L') 
+GROUP BY  
+    a.name,  
+    b.type  
+ORDER BY  
+    a.name,  
+    Backup_Type;
+
+
+
+-----9. Capture system information 
+-- A. SQL Server version and edition
+SELECT 
+    SERVERPROPERTY('ProductVersion') AS ProductVersion, 
+    SERVERPROPERTY('ProductLevel') AS ProductLevel, 
+    SERVERPROPERTY('Edition') AS Edition, 
+    SERVERPROPERTY('EngineEdition') AS EngineEdition, 
+    SERVERPROPERTY('MachineName') AS MachineName;
+
+-- B. SQL Server uptime
+SELECT 
+    sqlserver_start_time AS SQLServerStartTime
+FROM sys.dm_os_sys_info;
+
+
+----10. SQL Server configuration settings 
+A. (Server Level Configuraiton)
+SELECT 
+    name, 
+    value_in_use
+FROM sys.configurations;
+
+
+B.  Get SQL Server instance configurations
+EXEC sp_configure;
+ 
+
+-----11. Capture Running Services (with powershell script)
+
+Get-Service | Select-Object Name, DisplayName, Status, StartType | Export-Csv -Path "C:\Temp\ServicesList.csv" -NoTypeInformation 
+
+
+----12. Capture SQL Server Error Log
+EXEC sp_configure 'show advanced options', 1;
+RECONFIGURE;
+EXEC sp_configure 'xp_cmdshell', 1;
+RECONFIGURE;
+
+-- Export SQL Server Error Log to a file
+DECLARE @filePath NVARCHAR(255) = 'C:\Temp\SQLErrorLog.txt';
+DECLARE @sqlCmd NVARCHAR(255) = 'bcp "EXEC sp_readerrorlog" queryout "' + @filePath + '" -c -T -S ' + @@servername;
+
+EXEC xp_cmdshell @sqlCmd;
+
+
+----13. Caputre Last Job Status of the sql server 
+
+USE msdb;
+GO
+
+-- Query to get the last run status of each SQL Server Agent job
+SELECT 
+    j.name AS JobName,
+    h.run_date AS LastRunDate,
+    STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 5, 0, ':'), 3, 0, ':') AS LastRunTime,
+    CASE h.run_status
+        WHEN 0 THEN 'Failed'
+        WHEN 1 THEN 'Succeeded'
+        WHEN 2 THEN 'Retry'
+        WHEN 3 THEN 'Canceled'
+        WHEN 4 THEN 'In Progress'
+    END AS LastRunStatus,
+    h.message AS Message
+FROM 
+    sysjobs j
+INNER JOIN 
+    sysjobhistory h ON j.job_id = h.job_id
+WHERE 
+    h.instance_id = (SELECT MAX(h2.instance_id)
+                     FROM sysjobhistory h2
+                     WHERE h2.job_id = j.job_id)
+ORDER BY 
+    LastRunDate DESC, LastRunTime DESC;
+
+
+
+-----14.  Service Account
+EXEC xp_instance_regread 
+    N'HKEY_LOCAL_MACHINE', 
+    N'SYSTEM\CurrentControlSet\Services\MSSQLSERVER', 
+    N'ObjectName';
+
+
+
+-----15. Check the Active Connection
+SELECT 
+    DB_NAME(dbid) as DBName, hostname,
+    COUNT(dbid) as NumberOfConnections,
+    loginame as LoginName
+FROM
+    master..sysprocesses
+WHERE 
+    dbid > 0
+GROUP BY 
+    dbid, loginame,hostname
+go
+
+
+
+---16.  DBfile Location
+sp_helfile
+
+
+----17. 
+
+
+-----21. Event Viewer Report 
+A. System Logs
+
+# Define the path for the CSV file 
+
+$outputPath = "C:\Temp\SystemLogs.csv" 
+
+ 
+# Get the system event logs and select relevant properties 
+
+Get-WinEvent -LogName System |  
+
+Select-Object TimeCreated, Id, LevelDisplayName, Message |  
+
+Export-Csv -Path $outputPath -NoTypeInformation 
+
+ 
+Write-Host "System logs exported to $outputPath" 
+
+
+B. Application Logs
+
+
+
+
+
+22. Disk I\O
+
+SELECT
+   [ReadLatency] =
+        CASE WHEN [num_of_reads] = 0
+            THEN 0 ELSE ([io_stall_read_ms] / [num_of_reads]) END,
+   [WriteLatency] =
+        CASE WHEN [num_of_writes] = 0
+            THEN 0 ELSE ([io_stall_write_ms] / [num_of_writes]) END,
+   [Latency] =
+        CASE WHEN ([num_of_reads] = 0 AND [num_of_writes] = 0)
+            THEN 0 ELSE ([io_stall] / ([num_of_reads] + [num_of_writes])) END,
+   [Latency Desc] = 
+         CASE 
+            WHEN ([num_of_reads] = 0 AND [num_of_writes] = 0) THEN 'N/A' 
+            ELSE 
+               CASE WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 2 THEN 'Excellent'
+                    WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 6 THEN 'Very good'
+                    WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 11 THEN 'Good'
+                    WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 21 THEN 'Poor'
+                    WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 101 THEN 'Bad'
+                    WHEN ([io_stall] / ([num_of_reads] + [num_of_writes])) < 501 THEN 'Yikes!'
+               ELSE 'YIKES!!'
+               END 
+         END, 
+   [AvgBPerRead] =
+        CASE WHEN [num_of_reads] = 0
+            THEN 0 ELSE ([num_of_bytes_read] / [num_of_reads]) END,
+   [AvgBPerWrite] =
+        CASE WHEN [num_of_writes] = 0
+            THEN 0 ELSE ([num_of_bytes_written] / [num_of_writes]) END,
+   [AvgBPerTransfer] =
+        CASE WHEN ([num_of_reads] = 0 AND [num_of_writes] = 0)
+            THEN 0 ELSE
+                (([num_of_bytes_read] + [num_of_bytes_written]) /
+                ([num_of_reads] + [num_of_writes])) END,
+   LEFT ([mf].[physical_name], 2) AS [Drive],
+   DB_NAME ([vfs].[database_id]) AS [DB],
+   [mf].[physical_name]
+FROM
+   sys.dm_io_virtual_file_stats (NULL,NULL) AS [vfs]
+   JOIN sys.master_files AS [mf]
+   ON [vfs].[database_id] = [mf].[database_id]
+      AND [vfs].[file_id] = [mf].[file_id]
+-- WHERE [vfs].[file_id] = 2 -- log files
+ORDER BY [Latency] DESC
+-- ORDER BY [ReadLatency] DESC
+-- ORDER BY [WriteLatency] DESC;
+GO
+
+
+
+23. 	-- List SQL Server logins and their associated roles
+
+---- Query to get server-level permissions
+--SELECT 
+--    sp.name AS PrincipalName,           -- The name of the login or role
+--    sp.type_desc AS PrincipalType,      -- Type of the principal (LOGIN, SERVER_ROLE)
+--    sp.is_disabled AS IsDisabled,       -- Whether the principal is disabled
+--    sp.default_database_name AS DefaultDB, -- Default database for the principal
+--    perm.permission_name AS Permission, -- Name of the permission granted/denied
+--    perm.state_desc AS PermissionState, -- Whether the permission is GRANT, DENY, or REVOKE
+--    perm.class_desc AS PermissionClass, -- Describes the securable class (like SERVER, ENDPOINT)
+--    perm.major_id AS SecurableId        -- The ID of the securable (in this case SERVER level)
+--FROM 
+--    sys.server_permissions perm
+--JOIN 
+--    sys.server_principals sp
+--ON 
+--    perm.grantee_principal_id = sp.principal_id
+--ORDER BY 
+--    sp.name, perm.permission_name;
+
+
+SELECT 
+    sp.name AS LoginName,
+    sp.type_desc AS LoginType,
+    sp.is_disabled AS IsDisabled,
+    sr.name AS ServerRole
+FROM 
+    sys.server_principals AS sp
+LEFT JOIN 
+    sys.server_role_members AS srm
+    ON sp.principal_id = srm.member_principal_id
+LEFT JOIN 
+    sys.server_principals AS sr
+    ON srm.role_principal_id = sr.principal_id
+WHERE a
+    sp.type IN ('S', 'U') -- 'S' for SQL login, 'U' for Windows login
+ORDER BY sp.name, sr.name;
+ 
+
+Role and Permission --
+-- Combined query for server role memberships and permissions
+SELECT 
+    sp.name AS PrincipalName, 
+    sp.type_desc AS PrincipalType, 
+    sp.is_disabled AS IsDisabled, 
+    sr.name AS RoleName, 
+    perm.permission_name AS Permission, 
+    perm.state_desc AS PermissionState, 
+    perm.class_desc AS PermissionClass, 
+    perm.major_id AS SecurableId
+FROM 
+    sys.server_principals sp
+LEFT JOIN 
+    sys.server_role_members srm ON sp.principal_id = srm.member_principal_id
+LEFT JOIN 
+    sys.server_principals sr ON srm.role_principal_id = sr.principal_id
+LEFT JOIN 
+    sys.server_permissions perm ON perm.grantee_principal_id = sp.principal_id
+ORDER BY 
+    sp.name, perm.permission_name, sr.name;
+
+
+
+----20.  Query to get the storage status of all databases on the server
+SELECT 
+    db.name AS DatabaseName,
+    mf.physical_name AS PhysicalFileName,
+    mf.type_desc AS FileType,
+    mf.size * 8 / 1024 AS FileSizeMB,         -- File size in MB
+    CAST(CASE 
+            WHEN vs.total_bytes IS NOT NULL 
+            THEN vs.available_bytes * 100.0 / vs.total_bytes 
+            ELSE NULL 
+         END AS DECIMAL(5, 2)) AS FreeSpacePercentage,
+    vs.total_bytes / 1024 / 1024 AS TotalSpaceMB,  -- Total space in MB
+    vs.available_bytes / 1024 / 1024 AS FreeSpaceMB -- Free space in MB
+FROM 
+    sys.master_files mf
+JOIN 
+    sys.databases db ON mf.database_id = db.database_id
+OUTER APPLY 
+    sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+ORDER BY 
+    db.name, mf.type_desc;
+
+
+
+------------------------------------------------------------------------------------------------
+----To check the IFI is enable or not
+
+EXEC sp_readerrorlog 0, 1, N'Instant File Initialization';
+
+-----------------------------------------------------------------------------------
+
+------Server Level Permission
+
+SELECT pr.name, pe.permission_name, pe.state_desc
+FROM sys.server_permissions AS pe
+JOIN sys.server_principals AS pr
+ON pe.grantee_principal_id = pr.principal_id
+ORDER BY pr.name, pe.permission_name;

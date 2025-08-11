@@ -1,0 +1,78 @@
+1. SQL Server Version and Edition
+
+SELECT SERVERPROPERTY('ProductVersion') AS ProductVersion,
+       SERVERPROPERTY('ProductLevel') AS ProductLevel,
+       SERVERPROPERTY('Edition') AS Edition,
+       SERVERPROPERTY('EngineEdition') AS EngineEdition,
+       SERVERPROPERTY('MachineName') AS MachineName,
+       SERVERPROPERTY('IsClustered') AS IsClustered,
+       SERVERPROPERTY('IsIntegratedSecurityOnly') AS IsIntegratedSecurityOnly;
+
+2. System Hardware Information
+
+SELECT cpu_count AS CPU_Count,
+       hyperthread_ratio AS Hyperthread_Ratio,
+       physical_memory_kb / 1024 AS Physical_Memory_MB
+FROM sys.dm_os_sys_info;
+
+
+3. SQL Server Configuration
+
+EXEC sp_configure;
+
+
+4. SQL Server Services
+
+EXEC xp_servicecontrol 'QUERYSTATE', 'MSSQLServer';
+EXEC xp_servicecontrol 'QUERYSTATE', 'SQLServerAgent';
+
+
+5. Network Inforamtion
+
+SELECT protocol_desc AS Protocol,
+       local_net_address AS LocalAddress,
+       local_tcp_port AS LocalPort
+FROM sys.dm_exec_connections
+WHERE session_id = @@SPID;
+
+
+6. Installed Feature
+
+SELECT * FROM sys.dm_server_services;
+
+
+7. Databse Information
+
+SELECT name AS DatabaseName,
+       state_desc AS State,
+       recovery_model_desc AS RecoveryModel
+FROM sys.databases;
+
+
+8. Users Account and Role
+
+SELECT name AS LoginName,
+       type_desc AS Type,
+       is_disabled AS IsDisabled
+FROM sys.server_principals;
+
+
+9. Security Configuration
+
+SELECT name AS ConfigName,
+       value AS ConfigValue
+FROM sys.configurations
+WHERE name LIKE '%audit%' OR name LIKE '%password%' OR name LIKE '%encryption%';
+
+
+10. Network Protocol Enabled
+----->> Go to SQL Server Configuration ---->> Open SQL Server Network Configuraiton ------> TCP/IP (Enable, Port number 1437, 1433, 1438)
+if change to port number or enable to network port number then restart to sql server
+
+EXEC xp_instance_regread
+  N'HKEY_LOCAL_MACHINE',
+  N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib\Tcp\IPAll',
+  N'Enabled';
+
+
+

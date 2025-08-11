@@ -1,0 +1,47 @@
+To capture the last status of SQL Server Agent jobs, you can query the msdb database,
+specifically the sysjobs and sysjobhistory tables. The following query provides the last run status of all jobs:
+
+To get the last run status of all SQL Server Agent jobs. This will help you monitor and manage your SQL Server Agent jobs effectively.
+
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+USE msdb;
+GO
+
+WITH LastRun AS (
+    SELECT 
+        job_id,
+        MAX(instance_id) AS last_instance_id
+    FROM 
+        sysjobhistory
+    GROUP BY 
+        job_id
+)
+SELECT 
+    j.name AS JobName,
+    j.enabled AS IsEnabled,
+    CONVERT(VARCHAR, h.run_date) AS LastRunDate,
+    STUFF(
+        STUFF(
+            RIGHT('000000' + CONVERT(VARCHAR(6), h.run_time), 6),
+            3, 0, ':'),
+        6, 0, ':') AS LastRunTime,
+    CASE h.run_status
+        WHEN 0 THEN 'Failed'
+        WHEN 1 THEN 'Succeeded'
+        WHEN 2 THEN 'Retry'
+        WHEN 3 THEN 'Canceled'
+        ELSE 'Unknown'
+    END AS LastRunStatus,
+    h.message AS LastRunMessage
+FROM 
+    sysjobs AS j
+LEFT JOIN 
+    LastRun AS lr
+    ON j.job_id = lr.job_id
+LEFT JOIN 
+    sysjobhistory AS h
+    ON lr.job_id = h.job_id
+    AND lr.last_instance_id = h.instance_id
+ORDER BY 
+    j.name;

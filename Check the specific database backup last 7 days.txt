@@ -1,0 +1,27 @@
+DECLARE @DatabaseName SYSNAME = 'YourDatabaseName';  -- Replace with your DB name
+
+SELECT 
+    b.database_name AS DatabaseName,
+    CASE b.type
+        WHEN 'D' THEN 'Full Backup'
+        WHEN 'I' THEN 'Differential Backup'
+        WHEN 'L' THEN 'Transaction Log Backup'
+        ELSE b.type
+    END AS BackupType,
+    b.backup_start_date,
+    b.backup_finish_date,
+    DATEDIFF(MINUTE, b.backup_start_date, b.backup_finish_date) AS Duration_Minutes,
+    CAST(b.backup_size / 1048576.0 AS DECIMAL(18,2)) AS BackupSize_MB,
+    b.physical_device_name,
+    b.recovery_model
+FROM 
+    msdb.dbo.backupset b
+JOIN 
+    msdb.dbo.backupmediafamily m ON b.media_set_id = m.media_set_id
+WHERE 
+    b.database_name = @DatabaseName
+    AND b.backup_start_date >= DATEADD(DAY, -7, GETDATE())
+ORDER BY 
+    b.backup_finish_date DESC;
+
+

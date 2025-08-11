@@ -1,0 +1,21 @@
+HOw to find registry server 
+
+Find note-->
+package DOES NOT exist in the Installer cache
+
+E:\Backup
+scriptoutput
+
+registry
+HKEY_CLASSES_ROOT--> installer-->patches
+
+Registry Path: 
+   HKEY_CLASSES_ROOT\Installer\Products\01A65A921BEFF4B499ADD84E01A81A8D\SourceList
+
+
+
+Installer Cache File: C:\Windows\Installer\12d3bef9.msi
+ 
+     Missing cache file replaced by copying C:\ProgramData\Package Cache\{29A56A10-FEB1-4B4F-99DA-8DE4108AA1D8}v13.0.16106.4\x86\ssms_rs_loc.msi to C:\Windows\Installer\12d3bef9.msi
+     Previously missing package C:\Windows\Installer\12d3bef9.msi now exists in the Installer cache.
+ 

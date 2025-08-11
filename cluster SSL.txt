@@ -1,0 +1,40 @@
+;----------------- request.inf -----------------
+
+[version] 
+signature="$windows nt$"
+
+[newrequest] 
+;change to your,country code, company name and common name 
+subject = "c=<country_name>, s=<>, l=<>,  o=<organization_details>, ou=organisational services,  cn=<Server_Name with Extension>, e=<email_id>"
+friendlyname = <Server_Name with Extension>
+keyspec = 1 
+keylength = 2048 
+exportable = true 
+machinekeyset = true 
+smime = false
+privatekeyarchive = false
+userprotected = false
+useexistingkeyset = false
+providername = "microsoft rsa schannel cryptographic provider" 
+providertype = 12 
+requesttype = pkcs10 
+keyusage = 0xa0
+
+[enhancedkeyusageextension] 
+oid=1.3.6.1.5.5.7.3.1 ; this is for server authentication / token signing 
+
+[Extensions]
+2.5.29.17 = "{text}"
+;------------Enter the common Name CN and any additional Subject alternative Names (SAN)----------
+_continue_ = "DNS = Server_name"
+
+
+;-----------------------------------------------
+
+
+
+
+
+
+
+

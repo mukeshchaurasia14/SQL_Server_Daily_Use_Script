@@ -1,0 +1,37 @@
+USE msdb;
+GO
+
+WITH LastBackup AS (
+    SELECT 
+        database_name,
+        MAX(backup_finish_date) AS last_backup_finish_date
+    FROM 
+        backupset
+    GROUP BY 
+        database_name
+)
+SELECT 
+    lb.database_name AS DatabaseName,
+    bs.backup_start_date AS BackupStartDate,
+    bs.backup_finish_date AS BackupFinishDate,
+    CASE 
+        WHEN bs.type = 'D' THEN 'Full'
+        WHEN bs.type = 'I' THEN 'Differential'
+        WHEN bs.type = 'L' THEN 'Log'
+        ELSE 'Unknown'
+    END AS BackupType,
+    bs.backup_size / 1024 / 1024 AS BackupSizeMB,
+    bmf.physical_device_name AS BackupFile,
+    CASE 
+        WHEN bs.backup_finish_date IS NOT NULL THEN 'Successful'
+        ELSE 'Failed'
+    END AS BackupStatus
+FROM 
+    LastBackup lb
+INNER JOIN 
+    backupset bs ON lb.database_name = bs.database_name 
+    AND lb.last_backup_finish_date = bs.backup_finish_date
+INNER JOIN 
+    backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+ORDER BY 
+    lb.database_name;

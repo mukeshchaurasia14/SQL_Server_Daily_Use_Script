@@ -1,0 +1,28 @@
+GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA :: <schema> TO <user>;
+
+
+DENY SCHEMA PERMISSION--->
+
+DENY INSERT ON OBJECT::<schema>.<object> TO <user>;
+
+
+
+ -- Create the database role
+CREATE ROLE TableSelector AUTHORIZATION [dbo]
+GO
+ ---- Grant access rights to a specific schema in the database
+GRANT 
+      SELECT, INSERT, UPDATE, DELETE, ALTER 
+
+ON SCHEMA::dbo
+      TO TableSelector 
+GO
+
+-- Add an existing user to the new role created 
+EXEC sp_addrolemember 'TableSelector', 'MyDBUser'
+GO
+
+-- Revoke access rights on a schema from a role 
+DENY ALTER  -- you can customize here ...
+ON SCHEMA::dbo
+      TO TableSelector 

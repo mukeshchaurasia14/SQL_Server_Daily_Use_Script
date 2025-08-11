@@ -1,0 +1,31 @@
+-- Check Server Collation
+SELECT SERVERPROPERTY('Collation') AS ServerCollation;
+
+
+-- Check Instance Configuration
+SELECT 
+    name AS ConfigName,
+    value_in_use AS ConfigValue
+FROM 
+    sys.configurations
+ORDER BY 
+    name;
+
+-- Check SQL Server Version and Edition
+SELECT 
+    SERVERPROPERTY('ProductVersion') AS ProductVersion,
+    SERVERPROPERTY('ProductLevel') AS ProductLevel,
+    SERVERPROPERTY('Edition') AS Edition,
+    SERVERPROPERTY('EngineEdition') AS EngineEdition,
+    SERVERPROPERTY('IsClustered') AS IsClustered,
+    SERVERPROPERTY('IsHadrEnabled') AS IsHadrEnabled,
+    SERVERPROPERTY('MachineName') AS MachineName,
+    SERVERPROPERTY('IsIntegratedSecurityOnly') AS IsIntegratedSecurityOnly,
+    SERVERPROPERTY('IsFullTextInstalled') AS IsFullTextInstalled,
+    SERVERPROPERTY('FilestreamConfiguredLevel') AS FilestreamConfiguredLevel,
+    SERVERPROPERTY('FilestreamEffectiveLevel') AS FilestreamEffectiveLevel,
+    SERVERPROPERTY('IsXTPSupported') AS IsXTPSupported,
+    SERVERPROPERTY('ProductMajorVersion') AS ProductMajorVersion,
+    SERVERPROPERTY('ProductMinorVersion') AS ProductMinorVersion
+ORDER BY 
+    ProductVersion DESC;

@@ -1,0 +1,22 @@
+SELECT 
+    DB_NAME(vfs.database_id) AS DatabaseName,
+    mf.physical_name AS FileName,
+    mf.type_desc AS FileType,
+    vfs.num_of_reads AS NumberOfReads,
+    vfs.num_of_writes AS NumberOfWrites,
+    vfs.num_of_bytes_read / 1024 / 1024 AS MBRead,
+    vfs.num_of_bytes_written / 1024 / 1024 AS MBWritten,
+    vfs.io_stall_read_ms AS IOStallReadMS,
+    vfs.io_stall_write_ms AS IOStallWriteMS,
+    vfs.io_stall / 1000.0 AS TotalIOStallSec
+FROM 
+    sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
+INNER JOIN 
+    sys.master_files AS mf
+ON 
+    vfs.database_id = mf.database_id
+AND 
+    vfs.file_id = mf.file_id
+ORDER BY 
+    DatabaseName,
+    FileName;

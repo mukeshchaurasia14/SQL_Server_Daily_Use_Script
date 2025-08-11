@@ -1,0 +1,14 @@
+SELECT
+    servicename,
+ 
+    startup_type,
+    startup_type_desc
+FROM sys.dm_server_services
+WHERE servicename NOT LIKE 'SQL Full-text Filter Daemon Launcher%';
+
+
+
+-----------------------------------------------------------------------------------
+
+** To Check the Service.msc of sql server with powershell**
+

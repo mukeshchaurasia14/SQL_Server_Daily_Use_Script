@@ -1,0 +1,78 @@
+--> Check block session Details-->
+----------------------------------
+SELECT
+   s.blocking_session, 
+   s.sid, 
+   s.serial#, 
+   s.seconds_in_wait
+FROM
+   gv$session s
+WHERE
+   blocking_session IS NOT NULL;
+
+OR
+
+SELECT 
+   l1.sid || ' is blocking ' || l2.sid blocking_sessions
+FROM 
+   gv$lock l1, gv$lock l2
+WHERE
+   l1.block = 1 AND
+   l2.request > 0 AND
+   l1.id1 = l2.id1 AND
+   l1.id2 = l2.id2;
+---------------------------------------------------------------------
+Follow such steps in SSMS-->
+
+Step1. connect perticular(problem) server
+Step2. Right click on Server instance --> go to Report --> Click on report --> Open standard report 
+Step3. In standard report --> Open Activity All blocking Session or transaction
+
+OR
+Step1. Open Activity Monitor in SSMS and refer to the Blocked By column
+
+OR
+Query based methods :-->
+
+Step1. sp_who  and sp_who2
+Step2. sys.dm_exec_sessions  --> returns more data in a result set that is easier to query and filter. 
+
+Step3. sys.dm_exec_requests.status   ---> hows the status of a particular request
+Step4. sys.dm_exec_sessions.open_transaction_count   --> tells you the number of open transactions in this session. If this value is greater than 0, the SPID is within an open transaction. 
+Step5. sys.dm_exec_requests.open_transaction_count  --> 
+step6. sys.dm_exec_requests.wait_type, wait_time, and last_wait_type --> 
+Step7. sys.dm_exec_requests.wait_resource --> This column indicates the resource that a blocked request is waiting on.
+Step8. 
+
+Common blocking session:-->
+The "wait_type", "open_transaction_count", and "status" columns refer to information returned by 
+"sys.dm_exec_request", other columns may be returned by "sys.dm_exec_sessions".
+column indicates whether or not the blocking will resolve on its own, or whether the session should be killed via the "KILL" command
+
+Scenario	Wait_type	Open_Tran	Status	Resolves?	Other Symptoms
+1	NOT NULL	>= 0	runnable	Yes, when query finishes.	In sys.dm_exec_sessions, reads, cpu_time, and/or memory_usage columns will increase over time. Duration for the query will be high when completed.
+2	NULL	>0	sleeping	No, but SPID can be killed.	An attention signal may be seen in the Extended Event session for this SPID, indicating a query timeout or cancel has occurred.
+3	NULL	>= 0	runnable	No. Won't resolve until client fetches all rows or closes connection. SPID can be killed, but it may take up to 30 seconds.	If open_transaction_count = 0, and the SPID holds locks while the transaction isolation level is default (READ COMMITTED), this is a likely cause.
+4	Varies	>= 0	runnable	No. Won't resolve until client cancels queries or closes connections. SPIDs can be killed, but may take up to 30 seconds.	The hostname column in sys.dm_exec_sessions for the SPID at the head of a blocking chain will be the same as one of the SPID it's blocking.
+5	NULL	>0	rollback	Yes.	An attention signal may be seen in the Extended Events session for this SPID, indicating a query timeout or cancel has occurred, or simply a rollback statement has been issued.
+6	NULL	>0	sleeping	Eventually. When Windows NT determines the session is no longer active, the connection will be broken.	The last_request_start_time value in sys.dm_exec_sessions is much earlier than the current time.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+##Detailed blocking scenarios##
+-------------------------------
+Scenario 1: Blocking caused by a normally running query with a long execution time
+Solution:--> This class of blocking problem may be a performance problem and requires you to treat it as such. 
+Troubleshoot slow-running queries on SQL Server--> 
+	*index analysis,  investigating a single query, you can use the?Analyze Query in Database Engine Tuning Advisor option in SQL Query Analyzer; if you have a SQL Profiler trace of a large workload, you can use the Database Engine Tuning Advisor.
+*investigating a single query, you can use the?Analyze Query in Database Engine Tuning Advisor option in SQL Query Analyzer; if you have a SQL Profiler trace of a large workload, you can use the Database Engine Tuning Advisor.
+
+
+
+#Monitor and Tune for performance
+Database performance helps you minimize response times and maximize throughput, yielding optimal performance. Efficient network traffic, disk I/O, and CPU usage are key to peak performance.
+analyze the application requirements, understand the logical and physical structure of the data, assess database usage, and negotiate tradeoffs between conflicting uses such as online transaction processing (OLTP) versus decision support.
+
+* Troubleshoot problems or debug application components, such as stored procedures.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Scenario 2: Blocking caused by a sleeping SPID that has an uncommitted transaction

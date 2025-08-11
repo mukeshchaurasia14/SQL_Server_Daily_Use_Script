@@ -1,0 +1,18 @@
+all necessary SQL Server monitoring privileges are obtained
+
+DATABASEPROPERTYX function
+SELECT DB_NAME() AS DatabaseName, DATABASEPROPERTYEX('master', 'Status') AS DBStatus 
+
+SELECT * FROM sys.databases 
+
+
+select * from __NAMESPACE where Name LIKE 'ComputerManagement%' AND Name >= 'ComputerManagement11
+
+
+Below database task no has been completed
+-----------------------------------------------------------------------------------------------------------------------
+Data collector-->>
+
+built-in performance monitoring and tuning feature. It collects performance metrics from SQL Server instances, saves it in a local repository. 
+It uses Data Warehousing, SQL Server Agent, and Integration Services. 
+

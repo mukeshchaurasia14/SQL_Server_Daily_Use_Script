@@ -1,0 +1,7 @@
+2d0002a307e089684703e020d500000002a307
+
+m868cluat1 
+2d0004cd579c78156e74152e5b00000004cd57
+
+
+certutil -repairstore my "serial_number" 
