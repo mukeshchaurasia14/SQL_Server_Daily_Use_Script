@@ -1,0 +1,71 @@
+validate the size of a database in SQL Server, you have a few reliable methods with T-SQL, depending on whether you need the total database size, data vs. log breakdown, or per-file details.
+
+Here’s the DBA breakdown.
+
+1. Quick Database Size (exec sp_spaceused)
+This shows the total reserved space, data, index, and unused space for the current database.
+
+USE YourDatabaseName;
+GO
+EXEC sp_spaceused;
+Output example:
+
+database_name	database_size	unallocated space
+YourDB	15,472.00 MB	120.00 MB
+
+
+2. Database Size by File (data & log)
+This pulls info from sys.master_files and sys.databases:
+
+
+SELECT 
+    DB_NAME(mf.database_id) AS DatabaseName,
+    mf.type_desc AS FileType,       -- ROWS = Data, LOG = Log
+    mf.name AS LogicalFileName,
+    mf.physical_name AS PhysicalFilePath,
+    CAST(mf.size / 128.0 AS DECIMAL(18,2)) AS SizeMB,  -- 8 KB pages → MB
+    CAST(mf.size / 131072.0 AS DECIMAL(18,2)) AS SizeGB
+FROM sys.master_files mf
+WHERE mf.database_id = DB_ID('YourDatabaseName');
+
+
+3. All Databases – Total Size
+If you want the size of every database:
+
+
+SELECT 
+    DB_NAME(mf.database_id) AS DatabaseName,
+    CAST(SUM(mf.size) / 128.0 AS DECIMAL(18,2)) AS SizeMB,
+    CAST(SUM(mf.size) / 131072.0 AS DECIMAL(18,2)) AS SizeGB
+FROM sys.master_files mf
+GROUP BY mf.database_id
+ORDER BY SizeMB DESC;
+
+
+4. Validate Size with Free Space (sys.database_files)
+Inside a database, you can see file size and free space:
+
+
+USE YourDatabaseName;
+GO
+SELECT 
+    name AS LogicalFileName,
+    type_desc AS FileType,
+    size / 128.0 AS SizeMB,
+    size / 131072.0 AS SizeGB,
+    FILEPROPERTY(name, 'SpaceUsed') / 128.0 AS UsedSpaceMB,
+    (size - FILEPROPERTY(name, 'SpaceUsed')) / 128.0 AS FreeSpaceMB
+FROM sys.database_files;
+5. Notes for Validation
+1 SQL page = 8 KB → divide size by 128 for MB.
+
+To validate, compare:
+
+sys.master_files (server-wide view)
+
+sys.database_files (database-scoped view)
+
+sp_spaceused (aggregated size including indexes, system tables).
+
+Large difference between file size and used size means the database file has free space internally.
+
