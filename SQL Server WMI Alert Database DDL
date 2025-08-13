@@ -1,0 +1,21 @@
+SQL Server WMI Alert Database DDL
+
+USE [msdb]
+GO
+EXEC msdb.dbo.sp_update_alert @name=N'SQL Server WMI Alert Database DDL', 
+		@message_id=0, 
+		@severity=0, 
+		@enabled=1, 
+		@delay_between_responses=0, 
+		@include_event_description_in=0, 
+		@database_name=N'', 
+		@notification_message=N'', 
+		@event_description_keyword=N'', 
+		@performance_condition=N'', 
+		@wmi_namespace=N'\\.\root\Microsoft\SqlServer\ServerEvents\SEGP01', 
+		@wmi_query=N'select * from DDL_DATABASE_EVENTS', 
+		@job_id=N'f31410b0-72b8-43ef-9ccf-8c76054dc09d'
+GO
+EXEC msdb.dbo.sp_update_notification @alert_name=N'SQL Server WMI Alert Database DDL', 
+@operator_name=N'<Operator_Name>', @notification_method = 1
+GO
