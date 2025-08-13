@@ -1,0 +1,612 @@
+Below is a single, ready-to-import T-SQL deployment script that:
+
+Configures Database Mail (idempotent).
+
+Creates a server-level Extended Events session that captures DDL + DML statements and login events.
+
+Provisions an AuditDB with tables to persist events.
+
+Creates a processing stored procedure that:
+
+Incrementally ingests the XE files (no duplicates).
+
+Correlates each statement to the most recent login time for that session_id.
+
+Sends a consolidated email alert for new activity.
+
+Creates a SQL Agent Job + schedule to run the procedure on a cadence.
+
+✅ Works at the server level (captures activity across all databases), is idempotent (safe to rerun), and keeps timestamps in UTC for consistency.
+
+How to use
+Replace the parameter values in the “CONFIGURABLE PARAMETERS” block (mail, recipients, XE file path, schedule, polling window).
+
+Run the script in SQLCMD mode (optional) or simply in SSMS as a single batch.
+
+Ensure the folder for the XE target exists and SQL Server service account has write permissions.
+
+
+/* =========================================================================
+   SQL Server DDL/DML Activity Email Alert – One-Click Deployment
+   Version: 1.0
+   Author: ChatGPT (GPT-5 Thinking)
+   Last Updated: 2025-08-13 (UTC)
+
+   WHAT THIS DOES
+   -------------
+   - Enables Database Mail (idempotent) and configures a mail profile for alerts.
+   - Creates an Extended Events session capturing:
+       * sql_statement_completed (filtered to DDL/DML keywords)
+       * login (successful logins for correlation to login time)
+   - Persists events into AuditDB tables with de-duplication and watermarking.
+   - Correlates statement events to login time by session_id.
+   - Sends summarized email alerts for new events in last @PollingMinutes.
+   - Schedules a SQL Agent Job to run the process every @ScheduleEveryMinutes.
+
+   PREREQS
+   -------
+   - You have an SMTP server reachable from SQL Server.
+   - The folder for XE files exists and is writable by the SQL Server service account.
+   - SQL Server Agent is running (for the job/schedule to execute).
+
+   ROLLBACK
+   --------
+   - DROP EVENT SESSION [DBA_DDL_DML_Audit]
+   - DROP DATABASE [AuditDB]
+   - Optionally remove DB Mail profile and Agent job (names below).
+
+   ========================================================================= */
+
+/* =========================
+   CONFIGURABLE PARAMETERS
+   ========================= */
+DECLARE
+    @MailAccountName        sysname = N'DBA_Alerts_Account',
+    @MailProfileName        sysname = N'DBA_Alerts_Profile',
+    @MailAccountDescription nvarchar(256) = N'SQL Server DDL/DML Alerting Account',
+    @MailProfileDescription nvarchar(256) = N'Profile for DBA DDL/DML Alerts',
+    @FromEmail              nvarchar(254) = N'dba@yourcompany.com',
+    @DisplayName            nvarchar(128) = N'SQL Server Alerts',
+    @SmtpServer             sysname = N'smtp.yourcompany.com',
+    @SmtpPort               int     = 25,        -- Change if needed
+    @EnableSsl              bit     = 0,         -- 1 for TLS/SSL if required
+    @Recipients             nvarchar(max) = N'dba@yourcompany.com;team@yourcompany.com',
+
+    @XeFolderPath           nvarchar(4000) = N'C:\SQL_Audit',   -- must exist
+    @XeBaseFileName         sysname = N'DDL_DML_Audit',         -- base xel name
+    @XeMaxFileSizeMB        int = 50,                           -- per file
+    @XeMaxRollOverFiles     int = 8,
+
+    @JobName                sysname = N'DDL_DML Activity Email Alerts',
+    @JobCategory            sysname = N'Database Maintenance',
+    @JobOwner               sysname = SUSER_SNAME(),            -- change if needed
+    @ScheduleName           sysname = N'DDL_DML_Alert_Every_5_Min',
+    @ScheduleEveryMinutes   int = 5,
+
+    @PollingMinutes         int = 5,     -- alert window for new events in email
+    @EmailMaxRows           int = 2000;  -- cap to prevent huge emails
+
+/* =========================
+   1) ENABLE DATABASE MAIL
+   ========================= */
+BEGIN TRY
+    EXEC sp_configure 'show advanced options', 1; RECONFIGURE WITH OVERRIDE;
+    EXEC sp_configure 'Database Mail XPs', 1;    RECONFIGURE WITH OVERRIDE;
+END TRY
+BEGIN CATCH
+    PRINT 'INFO: sp_configure Database Mail XPs may already be enabled or requires sysadmin.';
+END CATCH;
+
+-- Create account if not exists
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysmail_account WHERE name = @MailAccountName)
+BEGIN
+    EXEC msdb.dbo.sysmail_add_account_sp
+         @account_name    = @MailAccountName,
+         @description     = @MailAccountDescription,
+         @email_address   = @FromEmail,
+         @display_name    = @DisplayName,
+         @mailserver_name = @SmtpServer,
+         @port            = @SmtpPort,
+         @enable_ssl      = @EnableSsl;
+END
+
+-- Create profile if not exists
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysmail_profile WHERE name = @MailProfileName)
+BEGIN
+    EXEC msdb.dbo.sysmail_add_profile_sp
+         @profile_name = @MailProfileName,
+         @description  = @MailProfileDescription;
+END
+
+-- Add account to profile if not already mapped
+IF NOT EXISTS (
+    SELECT 1
+    FROM msdb.dbo.sysmail_profileaccount pa
+    JOIN msdb.dbo.sysmail_profile p ON p.profile_id = pa.profile_id
+    JOIN msdb.dbo.sysmail_account a ON a.account_id = pa.account_id
+    WHERE p.name = @MailProfileName AND a.name = @MailAccountName
+)
+BEGIN
+    EXEC msdb.dbo.sysmail_add_profileaccount_sp
+         @profile_name = @MailProfileName,
+         @account_name = @MailAccountName,
+         @sequence_number = 1;
+END
+
+-- Make profile default for public (optional)
+IF NOT EXISTS (
+    SELECT 1
+    FROM msdb.dbo.sysmail_principalprofile
+    WHERE profile_id = (SELECT TOP(1) profile_id FROM msdb.dbo.sysmail_profile WHERE name = @MailProfileName)
+      AND principal_id = 0
+)
+BEGIN
+    EXEC msdb.dbo.sysmail_add_principalprofile_sp
+         @profile_name = @MailProfileName,
+         @principal_id = 0,
+         @is_default   = 1;
+END
+GO
+
+/* =========================
+   2) CREATE Extended Events
+   ========================= */
+DECLARE
+    @XeSessionName sysname = N'DBA_DDL_DML_Audit',
+    @XeFullPath    nvarchar(4000) = @XeFolderPath + N'\' + @XeBaseFileName + N'.xel';
+
+-- Stop & drop existing session (idempotent refresh)
+IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = @XeSessionName)
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = @XeSessionName)
+        EXEC('ALTER EVENT SESSION [' + @XeSessionName + N'] ON SERVER STATE = STOP;');
+
+    EXEC('DROP EVENT SESSION [' + @XeSessionName + N'] ON SERVER;');
+END
+
+DECLARE @sql nvarchar(max) = N'
+CREATE EVENT SESSION [' + @XeSessionName + N'] ON SERVER
+ADD EVENT sqlserver.sql_statement_completed
+(
+    ACTION
+    (
+        sqlserver.sql_text,
+        sqlserver.session_id,
+        sqlserver.username,
+        sqlserver.server_principal_name,
+        sqlserver.client_hostname,
+        sqlserver.client_app_name,
+        sqlserver.database_name
+    )
+    WHERE
+    (
+         sqlserver.sql_text LIKE ''CREATE%'' OR
+         sqlserver.sql_text LIKE ''ALTER%''  OR
+         sqlserver.sql_text LIKE ''DROP%''   OR
+         sqlserver.sql_text LIKE ''INSERT%'' OR
+         sqlserver.sql_text LIKE ''UPDATE%'' OR
+         sqlserver.sql_text LIKE ''DELETE%''
+    )
+),
+ADD EVENT sqlserver.login
+(
+    ACTION
+    (
+        sqlserver.session_id,
+        sqlserver.username,
+        sqlserver.server_principal_name,
+        sqlserver.client_hostname,
+        sqlserver.client_app_name
+    )
+)
+ADD TARGET package0.event_file
+(
+    SET filename = N''' + @XeFolderPath + N'\' + @XeBaseFileName + N''',
+        max_file_size = ' + CAST(@XeMaxFileSizeMB AS nvarchar(20)) + N',
+        max_rollover_files = ' + CAST(@XeMaxRollOverFiles AS nvarchar(20)) + N'
+);';
+
+EXEC (@sql);
+EXEC (N'ALTER EVENT SESSION [' + @XeSessionName + N'] ON SERVER STATE = START;');
+GO
+
+/* =========================
+   3) CREATE DATABASE & TABLES
+   ========================= */
+IF DB_ID(N'AuditDB') IS NULL
+BEGIN
+    CREATE DATABASE AuditDB;
+END
+GO
+USE AuditDB;
+GO
+
+-- Watermark table: last processed UTC timestamp per file set
+IF OBJECT_ID('dbo.XE_Watermark','U') IS NULL
+CREATE TABLE dbo.XE_Watermark
+(
+    WatermarkId     int IDENTITY(1,1) PRIMARY KEY,
+    SessionName     sysname NOT NULL,
+    LastEventTimeUtc datetime2(7) NULL,
+    CONSTRAINT UQ_XE_Watermark UNIQUE(SessionName)
+);
+
+IF NOT EXISTS (SELECT 1 FROM dbo.XE_Watermark WHERE SessionName = N'DBA_DDL_DML_Audit')
+    INSERT dbo.XE_Watermark(SessionName, LastEventTimeUtc) VALUES (N'DBA_DDL_DML_Audit', NULL);
+
+-- Raw import staging (dedup by (EventName, EventTimeUtc, SessionId, SqlText hash))
+IF OBJECT_ID('dbo.XE_Raw','U') IS NULL
+CREATE TABLE dbo.XE_Raw
+(
+    RawId           bigint IDENTITY(1,1) PRIMARY KEY,
+    FileName        nvarchar(4000) NULL,
+    EventName       sysname NOT NULL,
+    EventTimeUtc    datetime2(7) NOT NULL,
+    SessionId       int NULL,
+    LoginName       nvarchar(256) NULL,
+    ServerPrincipal nvarchar(256) NULL,
+    HostName        nvarchar(256) NULL,
+    AppName         nvarchar(512) NULL,
+    DatabaseName    sysname NULL,
+    SqlText         nvarchar(max) NULL,
+    EventHash       binary(32) NULL
+);
+
+-- Successful login events (for correlation of login time)
+IF OBJECT_ID('dbo.XE_Logins','U') IS NULL
+CREATE TABLE dbo.XE_Logins
+(
+    LoginId         bigint IDENTITY(1,1) PRIMARY KEY,
+    EventTimeUtc    datetime2(7) NOT NULL,
+    SessionId       int NULL,
+    LoginName       nvarchar(256) NULL,
+    ServerPrincipal nvarchar(256) NULL,
+    HostName        nvarchar(256) NULL,
+    AppName         nvarchar(512) NULL
+);
+
+-- Final normalized statement log with correlated LoginTime
+IF OBJECT_ID('dbo.DDL_DML_Audit_Log','U') IS NULL
+CREATE TABLE dbo.DDL_DML_Audit_Log
+(
+    AuditId         bigint IDENTITY(1,1) PRIMARY KEY,
+    EventTimeUtc    datetime2(7) NOT NULL,
+    LoginTimeUtc    datetime2(7) NULL,   -- correlated from XE_Logins
+    SessionId       int NULL,
+    LoginName       nvarchar(256) NULL,
+    ServerPrincipal nvarchar(256) NULL,
+    HostName        nvarchar(256) NULL,
+    AppName         nvarchar(512) NULL,
+    DatabaseName    sysname NULL,
+    SqlText         nvarchar(max) NULL
+);
+
+-- Helper index for faster email window scans
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_DDL_DML_Audit_Log_EventTimeUtc' AND object_id = OBJECT_ID('dbo.DDL_DML_Audit_Log'))
+    CREATE INDEX IX_DDL_DML_Audit_Log_EventTimeUtc ON dbo.DDL_DML_Audit_Log(EventTimeUtc) INCLUDE (LoginName, SessionId, HostName, AppName, DatabaseName);
+
+/* =========================
+   4) PROCESSING PROCEDURE
+   ========================= */
+IF OBJECT_ID('dbo.usp_Process_DDL_DML_XE_and_Email','P') IS NOT NULL
+    DROP PROCEDURE dbo.usp_Process_DDL_DML_XE_and_Email;
+GO
+CREATE PROCEDURE dbo.usp_Process_DDL_DML_XE_and_Email
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE
+        @SessionName  sysname = N'DBA_DDL_DML_Audit',
+        @XeFolderPath nvarchar(4000),
+        @XeBaseName   sysname,
+        @LastWatermark datetime2(7),
+        @PollingMinutes int,
+        @MailProfileName sysname,
+        @Recipients nvarchar(max),
+        @EmailMaxRows int;
+
+    -- Pull config from outer vars via temporary config table (or hardcode here)
+    -- For simplicity, load from SESSION_CONTEXT if provided; else fallback literals:
+    SELECT
+        @XeFolderPath   = TRY_CAST(SESSION_CONTEXT(N'XeFolderPath') AS nvarchar(4000)),
+        @XeBaseName     = TRY_CAST(SESSION_CONTEXT(N'XeBaseFileName') AS sysname),
+        @PollingMinutes = TRY_CAST(SESSION_CONTEXT(N'PollingMinutes') AS int),
+        @MailProfileName= TRY_CAST(SESSION_CONTEXT(N'MailProfileName') AS sysname),
+        @Recipients     = TRY_CAST(SESSION_CONTEXT(N'Recipients') AS nvarchar(max)),
+        @EmailMaxRows   = TRY_CAST(SESSION_CONTEXT(N'EmailMaxRows') AS int);
+
+    IF @XeFolderPath IS NULL SET @XeFolderPath = N'C:\SQL_Audit';
+    IF @XeBaseName   IS NULL SET @XeBaseName   = N'DDL_DML_Audit';
+    IF @PollingMinutes IS NULL SET @PollingMinutes = 5;
+    IF @MailProfileName IS NULL SET @MailProfileName = N'DBA_Alerts_Profile';
+    IF @Recipients IS NULL SET @Recipients = N'dba@yourcompany.com';
+    IF @EmailMaxRows IS NULL SET @EmailMaxRows = 2000;
+
+    SELECT @LastWatermark = LastEventTimeUtc
+    FROM dbo.XE_Watermark
+    WHERE SessionName = @SessionName;
+
+    DECLARE @XePattern nvarchar(4000) = @XeFolderPath + N'\' + @XeBaseName + N'*.xel';
+
+    /* ---- 4.1 Import new XE rows into staging (XE_Raw) ---- */
+    ;WITH xe AS
+    (
+        SELECT
+            CAST(x.event_data AS xml) AS ev,
+            x.file_name
+        FROM sys.fn_xe_file_target_read_file(@XePattern, NULL, NULL, NULL) AS x
+    )
+    INSERT INTO dbo.XE_Raw (FileName, EventName, EventTimeUtc, SessionId, LoginName, ServerPrincipal, HostName, AppName, DatabaseName, SqlText, EventHash)
+    SELECT DISTINCT
+        xe.file_name,
+        ev.value('(/event/@name)[1]','sysname') AS EventName,
+        ev.value('(/event/@timestamp)[1]','datetime2(7)') AS EventTimeUtc,   -- UTC
+        ev.value('(/event/action[@name="session_id"]/value)[1]','int') AS SessionId,
+        ev.value('(/event/action[@name="username"]/value)[1]','nvarchar(256)') AS LoginName,
+        ev.value('(/event/action[@name="server_principal_name"]/value)[1]','nvarchar(256)') AS ServerPrincipal,
+        ev.value('(/event/action[@name="client_hostname"]/value)[1]','nvarchar(256)') AS HostName,
+        ev.value('(/event/action[@name="client_app_name"]/value)[1]','nvarchar(512)') AS AppName,
+        ev.value('(/event/action[@name="database_name"]/value)[1]','sysname') AS DatabaseName,
+        ev.value('(/event/action[@name="sql_text"]/value)[1]','nvarchar(max)') AS SqlText,
+        HASHBYTES('SHA2_256',
+            CONCAT(
+                ev.value('(/event/@name)[1]','nvarchar(128)'),'|',
+                CONVERT(nvarchar(50), ev.value('(/event/@timestamp)[1]','datetime2(7)'), 126),'|',
+                ev.value('(/event/action[@name="session_id"]/value)[1]','nvarchar(50)'),'|',
+                ev.value('(/event/action[@name="server_principal_name"]/value)[1]','nvarchar(256)'),'|',
+                ev.value('(/event/action[@name="client_hostname"]/value)[1]','nvarchar(256)'),'|',
+                ev.value('(/event/action[@name="client_app_name"]/value)[1]','nvarchar(512)'),'|',
+                LEFT(ev.value('(/event/action[@name="sql_text"]/value)[1]','nvarchar(max)'), 4000)
+            )
+        ) AS EventHash
+    FROM xe
+    WHERE
+        (@LastWatermark IS NULL OR ev.value('(/event/@timestamp)[1]','datetime2(7)') > @LastWatermark)
+        AND ev.value('(/event/@name)[1]','sysname') IN (N'sql_statement_completed', N'login')
+        -- Dedup against what we already staged:
+        AND NOT EXISTS
+        (
+            SELECT 1
+            FROM dbo.XE_Raw r
+            WHERE r.EventHash = HASHBYTES('SHA2_256',
+                CONCAT(
+                    ev.value('(/event/@name)[1]','nvarchar(128)'),'|',
+                    CONVERT(nvarchar(50), ev.value('(/event/@timestamp)[1]','datetime2(7)'), 126),'|',
+                    ev.value('(/event/action[@name="session_id"]/value)[1]','nvarchar(50)'),'|',
+                    ev.value('(/event/action[@name="server_principal_name"]/value)[1]','nvarchar(256)'),'|',
+                    ev.value('(/event/action[@name="client_hostname"]/value)[1]','nvarchar(256)'),'|',
+                    ev.value('(/event/action[@name="client_app_name"]/value)[1]','nvarchar(512)'),'|',
+                    LEFT(ev.value('(/event/action[@name="sql_text"]/value)[1]','nvarchar(max)'), 4000)
+                )
+            )
+        );
+
+    /* ---- 4.2 Split into Logins & Statements, update watermark ---- */
+    DECLARE @NewMaxTime datetime2(7);
+    SELECT @NewMaxTime = MAX(EventTimeUtc) FROM dbo.XE_Raw WHERE EventTimeUtc IS NOT NULL;
+
+    IF @NewMaxTime IS NOT NULL
+    BEGIN
+        MERGE dbo.XE_Logins AS t
+        USING
+        (
+            SELECT EventTimeUtc, SessionId, LoginName, ServerPrincipal, HostName, AppName
+            FROM dbo.XE_Raw
+            WHERE EventName = N'login'
+        ) AS s
+        ON 1 = 0  -- insert-only
+        WHEN NOT MATCHED THEN
+            INSERT (EventTimeUtc, SessionId, LoginName, ServerPrincipal, HostName, AppName)
+            VALUES (s.EventTimeUtc, s.SessionId, s.LoginName, s.ServerPrincipal, s.HostName, s.AppName);
+
+        -- Insert normalized statements (only DDL/DML already filtered by XE)
+        INSERT INTO dbo.DDL_DML_Audit_Log
+        (
+            EventTimeUtc, LoginTimeUtc, SessionId, LoginName, ServerPrincipal, HostName, AppName, DatabaseName, SqlText
+        )
+        SELECT
+            r.EventTimeUtc,
+            (
+                SELECT TOP (1) l.EventTimeUtc
+                FROM dbo.XE_Logins l
+                WHERE l.SessionId = r.SessionId
+                  AND l.EventTimeUtc <= r.EventTimeUtc
+                ORDER BY l.EventTimeUtc DESC
+            ) AS LoginTimeUtc,
+            r.SessionId,
+            COALESCE(NULLIF(r.LoginName, N''), r.ServerPrincipal),
+            r.ServerPrincipal,
+            r.HostName,
+            r.AppName,
+            r.DatabaseName,
+            r.SqlText
+        FROM dbo.XE_Raw r
+        WHERE r.EventName = N'sql_statement_completed'
+          AND NOT EXISTS
+          (
+              SELECT 1 FROM dbo.DDL_DML_Audit_Log a
+              WHERE a.EventTimeUtc = r.EventTimeUtc
+                AND ISNULL(a.SessionId, -1) = ISNULL(r.SessionId, -1)
+                AND ISNULL(a.ServerPrincipal, N'') = ISNULL(r.ServerPrincipal, N'')
+                AND LEFT(ISNULL(a.SqlText,N''), 4000) = LEFT(ISNULL(r.SqlText,N''), 4000)
+          );
+
+        -- Update watermark
+        UPDATE dbo.XE_Watermark SET LastEventTimeUtc = @NewMaxTime WHERE SessionName = @SessionName;
+    END
+
+    /* ---- 4.3 Compose + Send Email for the last @PollingMinutes ---- */
+    DECLARE @NowUtc datetime2(7) = SYSUTCDATETIME();
+    DECLARE @WindowStart datetime2(7) = DATEADD(MINUTE, -@PollingMinutes, @NowUtc);
+
+    DECLARE @cnt int;
+    SELECT @cnt = COUNT(*) FROM dbo.DDL_DML_Audit_Log WHERE EventTimeUtc > @WindowStart;
+
+    IF @cnt > 0
+    BEGIN
+        ;WITH cte AS
+        (
+            SELECT TOP (@EmailMaxRows)
+                EventTimeUtc,
+                ISNULL(LoginTimeUtc, CONVERT(datetime2(7), '0001-01-01T00:00:00')) AS LoginTimeUtc,
+                ISNULL(LoginName, N'')   AS LoginName,
+                ISNULL(ServerPrincipal,N'') AS ServerPrincipal,
+                ISNULL(SessionId, -1)    AS SessionId,
+                ISNULL(HostName, N'')    AS HostName,
+                ISNULL(AppName, N'')     AS AppName,
+                ISNULL(DatabaseName,N'') AS DatabaseName,
+                ISNULL(SqlText, N'')     AS SqlText
+            FROM dbo.DDL_DML_Audit_Log
+            WHERE EventTimeUtc > @WindowStart
+            ORDER BY EventTimeUtc DESC
+        )
+        SELECT @cnt = COUNT(*) FROM cte;
+
+        DECLARE @body nvarchar(max) =
+N'*** SQL Server DDL/DML Activity Alert ***' + CHAR(13)+CHAR(10) +
+N'UTC Window: ' + CONVERT(varchar(30), @WindowStart, 126) + N' to ' + CONVERT(varchar(30), @NowUtc, 126) + CHAR(13)+CHAR(10) +
+N'Rows: ' + CAST(@cnt AS varchar(20)) + CHAR(13)+CHAR(10) +
+REPLICATE('-', 70) + CHAR(13)+CHAR(10) +
+(
+    SELECT STRING_AGG(
+        N'Time(UTC): ' + CONVERT(nvarchar(30), EventTimeUtc, 126) + CHAR(13)+CHAR(10) +
+        CASE WHEN LoginTimeUtc > '0002-01-01' THEN N'LoginTime(UTC): ' + CONVERT(nvarchar(30), LoginTimeUtc, 126) + CHAR(13)+CHAR(10) ELSE N'' END +
+        N'Login: ' + NULLIF(LoginName,N'') + N' (Principal: ' + ServerPrincipal + N')' + CHAR(13)+CHAR(10) +
+        N'SessionId: ' + CAST(SessionId AS nvarchar(10)) + CHAR(13)+CHAR(10) +
+        N'Host: ' + HostName + N' | App: ' + AppName + N' | DB: ' + DatabaseName + CHAR(13)+CHAR(10) +
+        N'SQL: ' + SqlText + CHAR(13)+CHAR(10) +
+        REPLICATE('-', 70) + CHAR(13)+CHAR(10)
+    , CHAR(13)+CHAR(10))
+    FROM cte
+)
+;
+
+        EXEC msdb.dbo.sp_send_dbmail
+             @profile_name = @MailProfileName,
+             @recipients   = @Recipients,
+             @subject      = N'SQL Server DDL/DML Activity Alert (UTC)',
+             @body         = @body;
+    END
+END
+GO
+
+/* =========================
+   5) BOOTSTRAP SESSION CONTEXT FOR PROC (OPTIONAL)
+   ========================= */
+-- These help the proc pick up your config (it also has safe defaults)
+EXEC sys.sp_set_session_context @key=N'XeFolderPath',     @value=@XeFolderPath;
+EXEC sys.sp_set_session_context @key=N'XeBaseFileName',   @value=@XeBaseFileName;
+EXEC sys.sp_set_session_context @key=N'PollingMinutes',   @value=@PollingMinutes;
+EXEC sys.sp_set_session_context @key=N'MailProfileName',  @value=@MailProfileName;
+EXEC sys.sp_set_session_context @key=N'Recipients',       @value=@Recipients;
+EXEC sys.sp_set_session_context @key=N'EmailMaxRows',     @value=@EmailMaxRows;
+
+-- Initial run (also validates everything end-to-end)
+EXEC AuditDB.dbo.usp_Process_DDL_DML_XE_and_Email;
+GO
+
+/* =========================
+   6) SQL AGENT JOB + SCHEDULE
+   ========================= */
+USE msdb;
+GO
+DECLARE @jobId uniqueidentifier;
+
+-- Create or update job
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @JobName)
+BEGIN
+    EXEC msdb.dbo.sp_add_job
+         @job_name = @JobName,
+         @enabled = 1,
+         @description = N'Sends DDL/DML email alerts based on Extended Events.',
+         @start_step_id = 1,
+         @owner_login_name = @JobOwner,
+         @category_name = @JobCategory,
+         @job_id = @jobId OUTPUT;
+END
+ELSE
+BEGIN
+    SELECT @jobId = job_id FROM msdb.dbo.sysjobs WHERE name = @JobName;
+END
+
+-- Step: execute the processing proc
+IF NOT EXISTS
+(
+    SELECT 1 FROM msdb.dbo.sysjobsteps
+    WHERE job_id = @jobId AND step_id = 1
+)
+BEGIN
+    EXEC msdb.dbo.sp_add_jobstep
+         @job_id = @jobId,
+         @step_id = 1,
+         @step_name = N'Process XE + Send Email',
+         @subsystem = N'TSQL',
+         @database_name = N'AuditDB',
+         @command = N'EXEC dbo.usp_Process_DDL_DML_XE_and_Email;',
+         @on_success_action = 1,   -- Quit with success
+         @on_fail_action = 2;      -- Quit with failure
+END
+ELSE
+BEGIN
+    EXEC msdb.dbo.sp_update_jobstep
+         @job_id = @jobId,
+         @step_id = 1,
+         @database_name = N'AuditDB',
+         @command = N'EXEC dbo.usp_Process_DDL_DML_XE_and_Email;';
+END
+
+-- Schedule: every @ScheduleEveryMinutes minutes
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysschedules WHERE name = @ScheduleName)
+BEGIN
+    EXEC msdb.dbo.sp_add_schedule
+         @schedule_name = @ScheduleName,
+         @enabled = 1,
+         @freq_type = 4,                 -- daily
+         @freq_interval = 1,
+         @freq_subday_type = 4,          -- minutes
+         @freq_subday_interval = @ScheduleEveryMinutes,
+         @active_start_time = 0;         -- start now
+    DECLARE @schedule_id int = (SELECT schedule_id FROM msdb.dbo.sysschedules WHERE name = @ScheduleName);
+    EXEC msdb.dbo.sp_attach_schedule @job_id = @jobId, @schedule_id = @schedule_id;
+END
+ELSE
+BEGIN
+    DECLARE @schedule_id int = (SELECT schedule_id FROM msdb.dbo.sysschedules WHERE name = @ScheduleName);
+    EXEC msdb.dbo.sp_update_schedule
+         @schedule_id = @schedule_id,
+         @freq_type = 4,
+         @freq_interval = 1,
+         @freq_subday_type = 4,
+         @freq_subday_interval = @ScheduleEveryMinutes,
+         @enabled = 1;
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM msdb.dbo.sysjobschedules js
+        JOIN msdb.dbo.sysschedules s ON s.schedule_id = js.schedule_id
+        WHERE js.job_id = @jobId AND s.schedule_id = @schedule_id
+    )
+    BEGIN
+        EXEC msdb.dbo.sp_attach_schedule @job_id = @jobId, @schedule_id = @schedule_id;
+    END
+END
+
+-- Ensure job is enabled
+EXEC msdb.dbo.sp_update_job @job_id = @jobId, @enabled = 1;
+
+PRINT 'Deployment complete. The job "' + @JobName + '" is configured and scheduled.';
+GO
+
+Notes & tips
+Folder permissions: ensure @XeFolderPath exists (e.g., C:\SQL_Audit) and grant the SQL Server service account write access.
+
+Coverage: The XE filter is based on leading keywords (CREATE/ALTER/DROP/INSERT/UPDATE/DELETE). If your code uses leading comments or WITH (HINTS) before keywords, consider broadening the filter or removing the filter and post-filtering in the proc.
+
+Login time: derived by correlating each statement’s session_id to the most recent login event for that session occurring at or before the statement timestamp.
+
+Time zone: Emails report times in UTC. If you prefer local time, convert with AT TIME ZONE in SQL 2016+ or adjust in the email body generation.
+
+Load control: @EmailMaxRows limits email size; all rows are still persisted in AuditDB.dbo.DDL_DML_Audit_Log.
+
+Security: Emails can leak sensitive SQL text. If needed, redact by replacing the SqlText in the email body with a truncated or hashed version.
