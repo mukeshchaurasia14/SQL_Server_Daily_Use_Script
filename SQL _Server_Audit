@@ -1,0 +1,183 @@
+Set DDL, DMl Atlers
+
+if you want SQL Server to automatically detect any DDL (schema changes) or DML (INSERT/UPDATE/DELETE) activity and send an email alert with user ID, session ID, login time, and executed query, you’ll need a combination of:
+
+SQL Server Audit / Extended Events – to capture the activity in detail
+
+Database Mail – to send alerts.
+
+A SQL Agent job or triggered alert mechanism – to read captured events and send the mail.
+
+Step-by-Step Implementation
+1️⃣ Enable Database Mail
+If Database Mail isn’t already set up:
+
+
+-- Enable Database Mail
+EXEC sp_configure 'show advanced options', 1;  
+RECONFIGURE;
+EXEC sp_configure 'Database Mail XPs', 1;  
+RECONFIGURE;
+
+-- Create a new mail account (replace with your SMTP details)
+EXEC msdb.dbo.sysmail_add_account_sp
+    @account_name = 'DBA_Alerts',
+    @description = 'SQL Server DDL/DML Alerting',
+    @email_address = 'dba@yourcompany.com',
+    @display_name = 'SQL Server Alerts',
+    @mailserver_name = 'smtp.yourcompany.com';
+
+-- Create a profile
+EXEC msdb.dbo.sysmail_add_profile_sp
+    @profile_name = 'DBA_Alerts_Profile',
+    @description = 'Profile for DBA Alerts';
+
+-- Add account to profile
+EXEC msdb.dbo.sysmail_add_profileaccount_sp
+    @profile_name = 'DBA_Alerts_Profile',
+    @account_name = 'DBA_Alerts',
+    @sequence_number = 1;
+
+-- Grant profile to public (or restricted users)
+EXEC msdb.dbo.sysmail_add_principalprofile_sp
+    @profile_name = 'DBA_Alerts_Profile',
+    @principal_id = 0,
+    @is_default = 1;
+
+2️⃣ Create an Extended Events Session
+This will capture DDL and DML events along with the user login, session ID, login time, and the query text.
+
+
+CREATE EVENT SESSION [DDL_DML_Audit] ON SERVER
+ADD EVENT sqlserver.sql_statement_completed
+(
+    ACTION 
+    (
+        sqlserver.sql_text,
+        sqlserver.session_id,
+        sqlserver.username,
+        sqlserver.client_hostname,
+        sqlserver.client_app_name,
+        sqlserver.server_principal_name
+    )
+    WHERE 
+    (
+        sqlserver.sql_text LIKE 'CREATE%' OR
+        sqlserver.sql_text LIKE 'ALTER%' OR
+        sqlserver.sql_text LIKE 'DROP%' OR
+        sqlserver.sql_text LIKE 'INSERT%' OR
+        sqlserver.sql_text LIKE 'UPDATE%' OR
+        sqlserver.sql_text LIKE 'DELETE%'
+    )
+)
+ADD TARGET package0.event_file
+(
+    SET filename = 'C:\SQL_Audit\DDL_DML_Audit.xel', max_file_size = 10
+);
+GO
+
+ALTER EVENT SESSION [DDL_DML_Audit] ON SERVER STATE = START;
+📌 Why Extended Events instead of Triggers?
+
+DDL triggers can block operations and affect performance.
+
+Extended Events is lighter, server-level, and can capture both DDL and DML without locking objects.
+
+
+3️⃣ Create a Table to Store Audit Events
+We’ll load the event data from .xel file into a table.
+
+CREATE DATABASE AuditDB;
+GO
+USE AuditDB;
+GO
+
+CREATE TABLE dbo.DDL_DML_Audit_Log
+(
+    EventTime DATETIME2,
+    LoginName NVARCHAR(200),
+    SessionID INT,
+    HostName NVARCHAR(200),
+    AppName NVARCHAR(200),
+    SQLText NVARCHAR(MAX)
+);
+
+
+4️⃣ Create a Job to Process Events & Send Email
+This job will:
+
+Read new events from .xel file
+
+Insert into DDL_DML_Audit_Log
+
+Send email if new events are found
+
+
+DECLARE @EventXML XML;
+
+-- Read from Extended Events file
+INSERT INTO dbo.DDL_DML_Audit_Log (EventTime, LoginName, SessionID, HostName, AppName, SQLText)
+SELECT 
+    event_data.value('(event/@timestamp)[1]', 'DATETIME2') AS EventTime,
+    event_data.value('(event/action[@name="server_principal_name"]/value)[1]', 'NVARCHAR(200)') AS LoginName,
+    event_data.value('(event/action[@name="session_id"]/value)[1]', 'INT') AS SessionID,
+    event_data.value('(event/action[@name="client_hostname"]/value)[1]', 'NVARCHAR(200)') AS HostName,
+    event_data.value('(event/action[@name="client_app_name"]/value)[1]', 'NVARCHAR(200)') AS AppName,
+    event_data.value('(event/action[@name="sql_text"]/value)[1]', 'NVARCHAR(MAX)') AS SQLText
+FROM sys.fn_xe_file_target_read_file('C:\SQL_Audit\DDL_DML_Audit*.xel', NULL, NULL, NULL)
+CROSS APPLY (SELECT CAST(event_data AS XML)) AS X(EventXML)
+CROSS APPLY EventXML.nodes('//*') AS T(event_data)
+WHERE event_data.value('(event/@name)[1]', 'NVARCHAR(200)') = 'sql_statement_completed';
+
+
+5️⃣ Send Email for New Events
+Example:
+
+DECLARE @body NVARCHAR(MAX);
+
+SELECT @body = STRING_AGG(
+    'Time: ' + CONVERT(VARCHAR, EventTime, 120) + CHAR(10) +
+    'Login: ' + LoginName + CHAR(10) +
+    'Session ID: ' + CAST(SessionID AS VARCHAR) + CHAR(10) +
+    'Host: ' + HostName + CHAR(10) +
+    'App: ' + AppName + CHAR(10) +
+    'SQL: ' + SQLText + CHAR(10) + '--------------------', 
+    CHAR(13) + CHAR(10)
+)
+FROM dbo.DDL_DML_Audit_Log
+WHERE EventTime > DATEADD(MINUTE, -5, GETDATE());
+
+IF @body IS NOT NULL
+BEGIN
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'DBA_Alerts_Profile',
+        @recipients = 'dba@yourcompany.com',
+        @subject = 'SQL Server DDL/DML Activity Alert',
+        @body = @body;
+END
+
+
+6️⃣ Scheduling
+Create a SQL Agent job with two steps:
+
+Load new events into DDL_DML_Audit_Log
+
+Send email if there are events
+
+Schedule to run every 1–5 minutes.
+
+✅ Result
+Whenever someone runs a DDL or DML statement, you’ll get an email containing:
+
+Event Time
+
+Login Name
+
+Session ID
+
+Host Name
+
+Application Name
+
+SQL Statement
+
