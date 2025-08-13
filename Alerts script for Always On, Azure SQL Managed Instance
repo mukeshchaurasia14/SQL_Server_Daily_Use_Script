@@ -1,0 +1,228 @@
+ready-to-import .sql that does Database Mail + Extended Events + logging table + SQL Agent job all in one go, I’ll tailor it for a stand-alone SQL Server instance first, and then I can adapt it later for:
+
+Always On Availability Groups (so it runs only on the primary replica and avoids double alerts)
+
+Azure SQL Managed Instance (where XE file paths differ and Database Mail config changes)
+
+Per-database alerting with custom recipients
+
+Here’s the stand-alone version.
+It assumes:
+
+You have sysadmin privileges
+
+Database Mail is not yet configured (it will be set up)
+
+Alerts should trigger for DDL (CREATE, ALTER, DROP, TRUNCATE TABLE) and DML (INSERT, UPDATE, DELETE, MERGE)
+
+Details will be captured into a table, and SQL Agent will send emails periodically (or near real-time)
+
+
+/**********************************************************************
+  SQL Server DDL/DML Change Capture + Email Alert Solution
+  Version: 1.0
+  Works on: SQL Server Standalone Instance
+  Components:
+    1. Database Mail Setup
+    2. Extended Events Session
+    3. Logging Table
+    4. SQL Agent Job for Email Alerts
+**********************************************************************/
+
+USE master;
+GO
+
+/*------------------------------------------------------
+  1. Configure Database Mail (Skip if already configured)
+-------------------------------------------------------*/
+EXEC sp_configure 'show advanced options', 1;
+RECONFIGURE;
+EXEC sp_configure 'Database Mail XPs', 1;
+RECONFIGURE;
+
+-- Create a Database Mail account
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysmail_account WHERE name = 'DBA_Mail_Account')
+BEGIN
+    EXEC msdb.dbo.sysmail_add_account_sp
+        @account_name = 'DBA_Mail_Account',
+        @description  = 'DBA Alerts Mail Account',
+        @email_address = 'sqlalerts@yourcompany.com',
+        @display_name = 'SQL Server Alerts',
+        @mailserver_name = 'smtp.yourcompany.com',  -- Change SMTP
+        @port = 25,
+        @enable_ssl = 0; -- Change if needed
+END
+
+-- Create a Database Mail profile
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysmail_profile WHERE name = 'DBA_Alert_Profile')
+BEGIN
+    EXEC msdb.dbo.sysmail_add_profile_sp
+        @profile_name = 'DBA_Alert_Profile',
+        @description  = 'Profile for DBA Alerts';
+END
+
+-- Add account to profile
+BEGIN TRY
+    EXEC msdb.dbo.sysmail_add_profileaccount_sp
+        @profile_name = 'DBA_Alert_Profile',
+        @account_name = 'DBA_Mail_Account',
+        @sequence_number = 1;
+END TRY
+BEGIN CATCH
+    -- Ignore if already linked
+END CATCH
+
+-- Grant profile access to all users
+EXEC msdb.dbo.sysmail_add_principalprofile_sp
+    @profile_name = 'DBA_Alert_Profile',
+    @principal_id = 0,
+    @is_default = 1;
+GO
+
+
+/*------------------------------------------------------
+  2. Create Logging Table
+-------------------------------------------------------*/
+USE msdb;
+GO
+IF OBJECT_ID('dbo.DDL_DML_Events_Log') IS NOT NULL
+    DROP TABLE dbo.DDL_DML_Events_Log;
+
+CREATE TABLE dbo.DDL_DML_Events_Log
+(
+    EventID INT IDENTITY(1,1) PRIMARY KEY,
+    EventTime DATETIME2,
+    LoginName NVARCHAR(200),
+    SessionID INT,
+    HostName NVARCHAR(200),
+    DatabaseName NVARCHAR(200),
+    EventType NVARCHAR(50),
+    TSQLCommand NVARCHAR(MAX)
+);
+GO
+
+
+/*------------------------------------------------------
+  3. Create Extended Events Session
+-------------------------------------------------------*/
+USE master;
+GO
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'Capture_DDL_DML')
+    DROP EVENT SESSION [Capture_DDL_DML] ON SERVER;
+GO
+
+CREATE EVENT SESSION [Capture_DDL_DML]
+ON SERVER
+ADD EVENT sqlserver.sql_statement_completed
+(
+    ACTION (sqlserver.sql_text, sqlserver.session_id, sqlserver.client_hostname, sqlserver.database_name, sqlserver.server_principal_name)
+    WHERE sqlserver.sql_text LIKE 'CREATE%' 
+       OR sqlserver.sql_text LIKE 'ALTER%'
+       OR sqlserver.sql_text LIKE 'DROP%'
+       OR sqlserver.sql_text LIKE 'TRUNCATE%'
+       OR sqlserver.sql_text LIKE 'INSERT%'
+       OR sqlserver.sql_text LIKE 'UPDATE%'
+       OR sqlserver.sql_text LIKE 'DELETE%'
+       OR sqlserver.sql_text LIKE 'MERGE%'
+)
+ADD TARGET package0.event_file
+(
+    SET filename = 'C:\SQLXE\DDL_DML_Capture.xel', max_file_size = 50, max_rollover_files = 5
+);
+GO
+
+ALTER EVENT SESSION [Capture_DDL_DML] ON SERVER STATE = START;
+GO
+
+
+/*------------------------------------------------------
+  4. Create SQL Agent Job to Process XE File and Send Email
+-------------------------------------------------------*/
+USE msdb;
+GO
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = 'Send_DDL_DML_Alerts')
+    EXEC msdb.dbo.sp_delete_job @job_name = 'Send_DDL_DML_Alerts';
+
+DECLARE @jobId UNIQUEIDENTIFIER;
+EXEC sp_add_job @job_name = 'Send_DDL_DML_Alerts', @enabled = 1, @owner_login_name = 'sa', @job_id = @jobId OUTPUT;
+
+-- Job Step: Parse XE data and insert into table
+EXEC sp_add_jobstep
+    @job_id = @jobId,
+    @step_name = 'Parse XE & Send Alerts',
+    @subsystem = 'TSQL',
+    @command = N'
+;WITH EventData AS
+(
+    SELECT 
+        DATEADD(HOUR, DATEDIFF(HOUR, GETUTCDATE(), GETDATE()), xed.value(''(event/@timestamp)[1]'',''datetime2'')) AS EventTime,
+        xed.value(''(event/action[@name="server_principal_name"]/value)[1]'',''nvarchar(200)'') AS LoginName,
+        xed.value(''(event/action[@name="session_id"]/value)[1]'',''int'') AS SessionID,
+        xed.value(''(event/action[@name="client_hostname"]/value)[1]'',''nvarchar(200)'') AS HostName,
+        xed.value(''(event/action[@name="database_name"]/value)[1]'',''nvarchar(200)'') AS DatabaseName,
+        CASE
+            WHEN xed.value(''(event/data[@name="statement"]/value)[1]'',''nvarchar(max)'') LIKE ''CREATE%'' THEN ''DDL''
+            WHEN xed.value(''(event/data[@name="statement"]/value)[1]'',''nvarchar(max)'') LIKE ''ALTER%'' THEN ''DDL''
+            WHEN xed.value(''(event/data[@name="statement"]/value)[1]'',''nvarchar(max)'') LIKE ''DROP%'' THEN ''DDL''
+            ELSE ''DML''
+        END AS EventType,
+        xed.value(''(event/data[@name="statement"]/value)[1]'',''nvarchar(max)'') AS TSQLCommand
+    FROM sys.fn_xe_file_target_read_file(''C:\SQLXE\DDL_DML_Capture*.xel'', NULL, NULL, NULL) AS tab
+    CROSS APPLY tab.event_data.nodes(''//event'') AS q(xed)
+)
+INSERT INTO msdb.dbo.DDL_DML_Events_Log
+(
+    EventTime, LoginName, SessionID, HostName, DatabaseName, EventType, TSQLCommand
+)
+SELECT EventTime, LoginName, SessionID, HostName, DatabaseName, EventType, TSQLCommand
+FROM EventData
+WHERE EventTime > DATEADD(MINUTE, -5, GETDATE()); -- last 5 mins
+
+-- Send email if new events found
+IF EXISTS (SELECT 1 FROM msdb.dbo.DDL_DML_Events_Log WHERE EventTime > DATEADD(MINUTE, -5, GETDATE()))
+BEGIN
+    DECLARE @body NVARCHAR(MAX) = 
+        (SELECT STRING_AGG(CONCAT(''Time: '', EventTime, CHAR(13), 
+                                  ''Login: '', LoginName, CHAR(13), 
+                                  ''SessionID: '', SessionID, CHAR(13), 
+                                  ''Host: '', HostName, CHAR(13), 
+                                  ''DB: '', DatabaseName, CHAR(13),
+                                  ''Type: '', EventType, CHAR(13),
+                                  ''Query: '', TSQLCommand, CHAR(13), 
+                                  ''------------------------------''), CHAR(13) + CHAR(13))
+         FROM msdb.dbo.DDL_DML_Events_Log
+         WHERE EventTime > DATEADD(MINUTE, -5, GETDATE()));
+
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = ''DBA_Alert_Profile'',
+        @recipients = ''dba.team@yourcompany.com'',
+        @subject = ''SQL Server DDL/DML Change Alert'',
+        @body = @body;
+END
+',
+    @database_name = 'msdb';
+
+-- Schedule: every 5 minutes
+EXEC sp_add_schedule
+    @schedule_name = 'Every_5_Minutes',
+    @freq_type = 4,
+    @freq_interval = 1,
+    @freq_subday_type = 4,
+    @freq_subday_interval = 5,
+    @active_start_time = 0;
+
+EXEC sp_attach_schedule @job_id = @jobId, @schedule_name = 'Every_5_Minutes';
+EXEC sp_add_jobserver @job_id = @jobId, @server_name = @@SERVERNAME;
+GO
+
+PRINT '✅ DDL/DML Alert Solution Installed Successfully';
+
+
+
+If you want, I can now adapt this script for:
+
+Always On (so it runs only on primary replica, avoids double alerts)
+
+Azure SQL Managed Instance (XE file path changes, Database Mail config changes)
+
+Per-database custom recipients
