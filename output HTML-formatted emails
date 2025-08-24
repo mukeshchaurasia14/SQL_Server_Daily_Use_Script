@@ -1,0 +1,322 @@
+sending the health check as HTML email makes it much easier for DBAs to scan results quickly (green ✅ for OK, red ❌ for ALERT, yellow ⚠️ for INFO).
+
+Here’s an enhanced stored procedure version that outputs the report in a clean HTML table with color coding:
+
+🩺 SQL Server Daily Health Check – HTML Email Version
+USE [master];
+GO
+
+IF OBJECT_ID('dbo.usp_SQLServerDailyHealthCheckHTML','P') IS NOT NULL
+    DROP PROCEDURE dbo.usp_SQLServerDailyHealthCheckHTML;
+GO
+
+CREATE PROCEDURE dbo.usp_SQLServerDailyHealthCheckHTML
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Temp table for results
+    IF OBJECT_ID('tempdb..#HealthCheck') IS NOT NULL DROP TABLE #HealthCheck;
+
+    CREATE TABLE #HealthCheck (
+        CheckName NVARCHAR(200),
+        Detail NVARCHAR(MAX),
+        Status NVARCHAR(20),
+        CollectedAt DATETIME DEFAULT GETDATE()
+    );
+
+    -------------------------------------------------------------------
+    -- 1. Database State 💾
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Database State',
+           name + ' - ' + state_desc,
+           CASE WHEN state_desc='ONLINE' THEN 'OK' ELSE 'ALERT' END
+    FROM sys.databases;
+
+    -------------------------------------------------------------------
+    -- 2. Backup Status 📦
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Backup Status',
+           d.name + ' - Last Backup: ' +
+           ISNULL(CONVERT(VARCHAR, MAX(b.backup_finish_date), 120), 'No Backup Found'),
+           CASE WHEN MAX(b.backup_finish_date) < DATEADD(DAY,-1,GETDATE()) OR MAX(b.backup_finish_date) IS NULL
+                THEN 'ALERT' ELSE 'OK' END
+    FROM sys.databases d
+    LEFT JOIN msdb.dbo.backupset b ON d.name=b.database_name
+    GROUP BY d.name;
+
+    -------------------------------------------------------------------
+    -- 3. Failed Jobs 📋
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Failed Jobs',
+           j.name + ' failed on ' + CONVERT(VARCHAR, h.run_date),
+           'ALERT'
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobhistory h ON j.job_id = h.job_id
+    WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE()-1, 112))
+      AND h.run_status <> 1;
+
+    -------------------------------------------------------------------
+    -- 4. Disk Space 💽
+    -------------------------------------------------------------------
+    CREATE TABLE #disk (Drive CHAR(1), FreeMB INT);
+    INSERT INTO #disk EXEC xp_fixeddrives;
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Disk Space',
+           'Drive ' + Drive + ': ' + CAST(FreeMB AS VARCHAR) + ' MB Free',
+           CASE WHEN FreeMB < 10240 THEN 'ALERT'  -- <10GB free
+                WHEN FreeMB < 51200 THEN 'INFO'   -- <50GB free
+                ELSE 'OK' END
+    FROM #disk;
+    DROP TABLE #disk;
+
+    -------------------------------------------------------------------
+    -- 5. Blocking Sessions 🕒
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Blocking Sessions',
+           'SPID ' + CAST(session_id AS VARCHAR) + ' blocked by ' + CAST(blocking_session_id AS VARCHAR),
+           'ALERT'
+    FROM sys.dm_exec_requests
+    WHERE blocking_session_id <> 0;
+
+    -------------------------------------------------------------------
+    -- 6. Long Running Queries (> 5 min) ⏳
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Long Running Query',
+           'SPID ' + CAST(r.session_id AS VARCHAR) + ' running ' + 
+           CAST(DATEDIFF(MINUTE, r.start_time, GETDATE()) AS VARCHAR) + ' min',
+           'ALERT'
+    FROM sys.dm_exec_requests r
+    WHERE DATEDIFF(MINUTE, r.start_time, GETDATE()) > 5;
+
+    -------------------------------------------------------------------
+    -- Format results into HTML table
+    -------------------------------------------------------------------
+    DECLARE @HTML NVARCHAR(MAX) = 
+    N'<h2>SQL Server Daily Health Check Report</h2>' +
+    N'<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;font-family:Segoe UI;font-size:10pt;">' +
+    N'<tr style="background-color:#f2f2f2;font-weight:bold;"><th>Check</th><th>Detail</th><th>Status</th><th>Time</th></tr>';
+
+    SELECT @HTML += 
+        N'<tr>' +
+        N'<td>' + ISNULL(CheckName,'') + '</td>' +
+        N'<td>' + ISNULL(Detail,'') + '</td>' +
+        N'<td style="font-weight:bold;color:' + 
+            CASE Status WHEN 'OK' THEN 'green'
+                        WHEN 'INFO' THEN 'orange'
+                        ELSE 'red' END + ';">' + Status + '</td>' +
+        N'<td>' + CONVERT(VARCHAR, CollectedAt, 120) + '</td>' +
+        N'</tr>'
+    FROM #HealthCheck;
+
+    SET @HTML += N'</table>';
+
+    -------------------------------------------------------------------
+    -- Send Email
+    -------------------------------------------------------------------
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'DBA_Mail_Profile',      -- 🔧 change this
+        @recipients   = 'dba-team@company.com',  -- 🔧 change this
+        @subject      = 'SQL Server Daily Health Check (HTML)',
+        @body         = @HTML,
+        @body_format  = 'HTML';
+END
+GO
+
+🚀 How it Works
+
+Collects all results into #HealthCheck table.
+
+Builds a clean HTML <table> with:
+
+✅ Green = OK
+
+⚠️ Orange = INFO
+
+❌ Red = ALERT
+
+Sends formatted email using Database Mail.
+
+🛠 To Use
+
+Make sure Database Mail is configured (with profile DBA_Mail_Profile).
+
+Deploy this stored procedure in master.
+
+Create a SQL Agent Job → Step:
+
+EXEC dbo.usp_SQLServerDailyHealthCheckHTML;
+
+
+Schedule daily (e.g., 8 AM).
+
+
+-----------------------------------------------------------------------------------------------------------
+
+if your SQL instance is part of an Availability Group (AG), the report will also show replica sync state and flag any that are not SYNCHRONIZED.
+
+🩺 SQL Server Daily Health Check (HTML + HA Version)
+USE [master];
+GO
+
+IF OBJECT_ID('dbo.usp_SQLServerDailyHealthCheckHTML','P') IS NOT NULL
+    DROP PROCEDURE dbo.usp_SQLServerDailyHealthCheckHTML;
+GO
+
+CREATE PROCEDURE dbo.usp_SQLServerDailyHealthCheckHTML
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Temp table for results
+    IF OBJECT_ID('tempdb..#HealthCheck') IS NOT NULL DROP TABLE #HealthCheck;
+
+    CREATE TABLE #HealthCheck (
+        CheckName NVARCHAR(200),
+        Detail NVARCHAR(MAX),
+        Status NVARCHAR(20),
+        CollectedAt DATETIME DEFAULT GETDATE()
+    );
+
+    -------------------------------------------------------------------
+    -- 1. Database State 💾
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Database State',
+           name + ' - ' + state_desc,
+           CASE WHEN state_desc='ONLINE' THEN 'OK' ELSE 'ALERT' END
+    FROM sys.databases;
+
+    -------------------------------------------------------------------
+    -- 2. Backup Status 📦
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Backup Status',
+           d.name + ' - Last Backup: ' +
+           ISNULL(CONVERT(VARCHAR, MAX(b.backup_finish_date), 120), 'No Backup Found'),
+           CASE WHEN MAX(b.backup_finish_date) < DATEADD(DAY,-1,GETDATE()) OR MAX(b.backup_finish_date) IS NULL
+                THEN 'ALERT' ELSE 'OK' END
+    FROM sys.databases d
+    LEFT JOIN msdb.dbo.backupset b ON d.name=b.database_name
+    GROUP BY d.name;
+
+    -------------------------------------------------------------------
+    -- 3. Failed Jobs 📋
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Failed Jobs',
+           j.name + ' failed on ' + CONVERT(VARCHAR, h.run_date),
+           'ALERT'
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobhistory h ON j.job_id = h.job_id
+    WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE()-1, 112))
+      AND h.run_status <> 1;
+
+    -------------------------------------------------------------------
+    -- 4. Disk Space 💽
+    -------------------------------------------------------------------
+    CREATE TABLE #disk (Drive CHAR(1), FreeMB INT);
+    INSERT INTO #disk EXEC xp_fixeddrives;
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Disk Space',
+           'Drive ' + Drive + ': ' + CAST(FreeMB AS VARCHAR) + ' MB Free',
+           CASE WHEN FreeMB < 10240 THEN 'ALERT'  -- <10GB free
+                WHEN FreeMB < 51200 THEN 'INFO'   -- <50GB free
+                ELSE 'OK' END
+    FROM #disk;
+    DROP TABLE #disk;
+
+    -------------------------------------------------------------------
+    -- 5. Blocking Sessions 🕒
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Blocking Sessions',
+           'SPID ' + CAST(session_id AS VARCHAR) + ' blocked by ' + CAST(blocking_session_id AS VARCHAR),
+           'ALERT'
+    FROM sys.dm_exec_requests
+    WHERE blocking_session_id <> 0;
+
+    -------------------------------------------------------------------
+    -- 6. Long Running Queries (> 5 min) ⏳
+    -------------------------------------------------------------------
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'Long Running Query',
+           'SPID ' + CAST(r.session_id AS VARCHAR) + ' running ' + 
+           CAST(DATEDIFF(MINUTE, r.start_time, GETDATE()) AS VARCHAR) + ' min',
+           'ALERT'
+    FROM sys.dm_exec_requests r
+    WHERE DATEDIFF(MINUTE, r.start_time, GETDATE()) > 5;
+
+    -------------------------------------------------------------------
+    -- 7. AlwaysOn / HA Checks 🌐
+    -------------------------------------------------------------------
+    IF EXISTS (SELECT * FROM sys.availability_groups)
+    BEGIN
+        INSERT INTO #HealthCheck (CheckName, Detail, Status)
+        SELECT 'AlwaysOn AG',
+               ag.name + ' - ' + ar.replica_server_name + 
+               ' (' + ar_state.role_desc + ', ' + ar_state.synchronization_state_desc + ')',
+               CASE WHEN ar_state.synchronization_state_desc <> 'SYNCHRONIZED'
+                         OR ar_state.is_failover_ready = 0
+                    THEN 'ALERT' ELSE 'OK' END
+        FROM sys.availability_groups ag
+        JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
+        JOIN sys.dm_hadr_availability_replica_states ar_state ON ar.replica_id = ar_state.replica_id;
+    END
+
+    -------------------------------------------------------------------
+    -- Format results into HTML table
+    -------------------------------------------------------------------
+    DECLARE @HTML NVARCHAR(MAX) = 
+    N'<h2>SQL Server Daily Health Check Report</h2>' +
+    N'<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;font-family:Segoe UI;font-size:10pt;">' +
+    N'<tr style="background-color:#f2f2f2;font-weight:bold;"><th>Check</th><th>Detail</th><th>Status</th><th>Time</th></tr>';
+
+    SELECT @HTML += 
+        N'<tr>' +
+        N'<td>' + ISNULL(CheckName,'') + '</td>' +
+        N'<td>' + ISNULL(Detail,'') + '</td>' +
+        N'<td style="font-weight:bold;color:' + 
+            CASE Status WHEN 'OK' THEN 'green'
+                        WHEN 'INFO' THEN 'orange'
+                        ELSE 'red' END + ';">' + Status + '</td>' +
+        N'<td>' + CONVERT(VARCHAR, CollectedAt, 120) + '</td>' +
+        N'</tr>'
+    FROM #HealthCheck;
+
+    SET @HTML += N'</table>';
+
+    -------------------------------------------------------------------
+    -- Send Email
+    -------------------------------------------------------------------
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'DBA_Mail_Profile',      -- 🔧 change this
+        @recipients   = 'dba-team@company.com',  -- 🔧 change this
+        @subject      = 'SQL Server Daily Health Check (HTML)',
+        @body         = @HTML,
+        @body_format  = 'HTML';
+END
+GO
+
+
+✅ Enhancements in this version:
+
+Adds AlwaysOn / AG check showing:
+
+AG name
+
+Replica server name
+
+Role (Primary/Secondary)
+
+Synchronization state (SYNCHRONIZED vs NOT SYNCHRONIZED)
+
+Flags any replica not healthy as ALERT (Red).
+
+Everything appears in a neat HTML table with colors.
+
