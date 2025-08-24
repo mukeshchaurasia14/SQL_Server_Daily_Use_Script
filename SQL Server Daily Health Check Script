@@ -1,0 +1,121 @@
+/********************************************************************
+ Author:      Mukesh Chaurasia (Sample Script)
+ Purpose:     SQL Server Daily Health Check Summary
+ Usage:       Run manually or schedule as a SQL Agent Job
+********************************************************************/
+
+SET NOCOUNT ON;
+
+-- Create temp table to collect results
+IF OBJECT_ID('tempdb..#HealthCheck') IS NOT NULL
+    DROP TABLE #HealthCheck;
+
+CREATE TABLE #HealthCheck (
+    CheckName NVARCHAR(200),
+    Detail NVARCHAR(MAX),
+    Status NVARCHAR(50),
+    CollectedAt DATETIME DEFAULT GETDATE()
+);
+
+-------------------------------------------------------------------
+-- 1. SQL Services Status ⚙️
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'SQL Service Status',
+       'Check SQL Server & Agent services (manual/monitoring tool recommended)',
+       'INFO';
+
+-------------------------------------------------------------------
+-- 2. Database State 💾
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'Database State',
+       name + ' - ' + state_desc,
+       CASE WHEN state_desc='ONLINE' THEN 'OK' ELSE 'ALERT' END
+FROM sys.databases;
+
+-------------------------------------------------------------------
+-- 3. Backup Verification 📦
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'Backup Status',
+       d.name + ' - LastBackup: ' + 
+       ISNULL(CONVERT(VARCHAR, MAX(b.backup_finish_date), 120), 'No Backup Found'),
+       CASE WHEN MAX(b.backup_finish_date) < DATEADD(DAY,-1,GETDATE()) OR MAX(b.backup_finish_date) IS NULL
+            THEN 'ALERT' ELSE 'OK' END
+FROM sys.databases d
+LEFT JOIN msdb.dbo.backupset b ON d.name=b.database_name
+GROUP BY d.name;
+
+-------------------------------------------------------------------
+-- 4. Failed Jobs 📋
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'Failed Jobs',
+       j.name + ' failed on ' + CONVERT(VARCHAR, h.run_date),
+       'ALERT'
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobhistory h ON j.job_id = h.job_id
+WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE()-1, 112))
+  AND h.run_status <> 1;
+
+-------------------------------------------------------------------
+-- 5. Disk Space 💽
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+EXEC xp_fixeddrives;
+
+-------------------------------------------------------------------
+-- 6. Blocking Sessions 📊
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'Blocking Session',
+       'SPID ' + CAST(session_id AS VARCHAR) + ' blocked by ' + CAST(blocking_session_id AS VARCHAR),
+       'ALERT'
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0;
+
+-------------------------------------------------------------------
+-- 7. Error Log 🚨
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+EXEC xp_readerrorlog 0, 1, 'error', NULL;
+
+-------------------------------------------------------------------
+-- 8. Availability Group 🌐
+-------------------------------------------------------------------
+IF EXISTS (SELECT * FROM sys.databases WHERE replica_id IS NOT NULL)
+BEGIN
+    INSERT INTO #HealthCheck (CheckName, Detail, Status)
+    SELECT 'AlwaysOn AG',
+           ag.name + ' - ' + ar.replica_server_name + ' (' + ar_state.synchronization_state_desc + ')',
+           CASE WHEN ar_state.synchronization_state_desc <> 'SYNCHRONIZED' THEN 'ALERT' ELSE 'OK' END
+    FROM sys.availability_groups ag
+    JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
+    JOIN sys.dm_hadr_availability_replica_states ar_state ON ar.replica_id = ar_state.replica_id;
+END;
+
+-------------------------------------------------------------------
+-- 9. Failed Logins 🔐
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT TOP 10 'Failed Logins',
+       login_name + ' from ' + host_name,
+       'ALERT'
+FROM sys.fn_xe_file_target_read_file('system_health*.xel', NULL, NULL, NULL)
+WHERE event_data LIKE '%login failed%';
+
+-------------------------------------------------------------------
+-- 10. Long Running Queries 🕒
+-------------------------------------------------------------------
+INSERT INTO #HealthCheck (CheckName, Detail, Status)
+SELECT 'Long Running Query',
+       'SPID ' + CAST(r.session_id AS VARCHAR) + ' running ' + CAST(DATEDIFF(MINUTE, r.start_time, GETDATE()) AS VARCHAR) + ' min',
+       'ALERT'
+FROM sys.dm_exec_requests r
+WHERE DATEDIFF(MINUTE, r.start_time, GETDATE()) > 5;
+
+-------------------------------------------------------------------
+-- Final Output
+-------------------------------------------------------------------
+SELECT * FROM #HealthCheck ORDER BY CollectedAt, CheckName;
