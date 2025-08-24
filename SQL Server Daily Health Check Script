@@ -1,4 +1,154 @@
-/********************************************************************
+🩺 SQL Server Daily Health Check Guide
+1️⃣ Check SQL Services & Agent Status ⚙️
+
+Why: If SQL Server or Agent services are stopped, your entire environment (apps, jobs, backups) will fail.
+
+Query:
+
+-- Check SQL & Agent services status
+EXEC master.dbo.xp_servicecontrol 'QUERYSTATE', 'MSSQLSERVER';  
+EXEC master.dbo.xp_servicecontrol 'QUERYSTATE', 'SQLSERVERAGENT';
+
+2️⃣ Database Availability & State 💾
+
+Why: Any OFFLINE or SUSPECT database must be flagged immediately.
+
+Query:
+
+-- Check database state
+SELECT name, state_desc 
+FROM sys.databases
+WHERE state_desc <> 'ONLINE';
+
+3️⃣ Backup Verification 📦
+
+Why: Ensures disaster recovery readiness. Missing or failed backups = critical risk.
+
+Query:
+
+-- Latest backup for each database
+SELECT 
+    d.name AS DatabaseName,
+    MAX(b.backup_finish_date) AS LastBackup
+FROM sys.databases d
+LEFT JOIN msdb.dbo.backupset b 
+    ON d.name = b.database_name
+GROUP BY d.name
+ORDER BY LastBackup ASC;
+
+4️⃣ Job Status Review 📋
+
+Why: SQL Agent jobs handle ETL, reporting, maintenance. Failed jobs = downstream impact.
+
+Query:
+
+-- Failed jobs in last 24 hours
+SELECT j.name, h.run_date, h.run_time, h.run_status
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobhistory h 
+    ON j.job_id = h.job_id
+WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE()-1, 112))
+  AND h.run_status <> 1;
+
+5️⃣ Disk Space Monitoring 💽
+
+Why: Running out of space on data, log, or backup drives can halt SQL Server.
+
+Query:
+
+-- Free space per drive
+EXEC xp_fixeddrives;
+
+
+For detailed file-level:
+
+-- Space used per database file
+SELECT DB_NAME(database_id) AS DBName, 
+       name AS FileName, 
+       size*8/1024 AS SizeMB,
+       size*8/1024 - FILEPROPERTY(name, 'SpaceUsed')*8/1024 AS FreeMB
+FROM sys.master_files;
+
+6️⃣ Performance Counters 📊
+
+Why: Tracks CPU, Memory, I/O, TempDB growth & blocking.
+
+Query:
+
+-- CPU & Memory usage
+SELECT 
+    total_physical_memory_kb/1024 AS TotalMemoryMB,
+    available_physical_memory_kb/1024 AS FreeMemoryMB,
+    (total_physical_memory_kb - available_physical_memory_kb)/1024 AS UsedMemoryMB
+FROM sys.dm_os_sys_memory;
+
+-- Blocking sessions
+SELECT 
+    blocking_session_id, session_id, wait_type, wait_time, wait_resource
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0;
+
+7️⃣ Error & Event Log Review 🚨
+
+Why: Critical errors (login failures, corruption, service restarts) show up here.
+
+Query:
+
+-- Last 20 SQL Server error log entries
+EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL, N'desc';
+
+8️⃣ High Availability Health 🌐
+
+Why: For AOAG / Clusters / Log shipping, check synchronization & failover readiness.
+
+Query (AlwaysOn AG):
+
+-- Availability Group sync state
+SELECT ag.name AS AGName, 
+       ar.replica_server_name, 
+       ar_state.role_desc, 
+       ar_state.synchronization_state_desc
+FROM sys.availability_groups ag
+JOIN sys.availability_replicas ar 
+    ON ag.group_id = ar.group_id
+JOIN sys.dm_hadr_availability_replica_states ar_state 
+    ON ar.replica_id = ar_state.replica_id;
+
+9️⃣ Security & Login Monitoring 🔐
+
+Why: Failed logins or unauthorized access must be audited.
+
+Query:
+
+-- Failed login attempts in last 24h
+SELECT 
+    login_name, host_name, program_name, 
+    COUNT(*) AS FailedCount, MIN(start_time) AS FirstFailure, MAX(start_time) AS LastFailure
+FROM sys.fn_xe_file_target_read_file('system_health*.xel', NULL, NULL, NULL)
+WHERE event_data LIKE '%login failed%'
+GROUP BY login_name, host_name, program_name;
+
+🔟 Long Running / Blocked Transactions 🕒
+
+Why: Helps detect deadlocks and performance bottlenecks.
+
+Query:
+
+-- Long running queries (> 5 min)
+SELECT 
+    r.session_id, r.start_time, r.status, r.command, 
+    DATEDIFF(MINUTE, r.start_time, GETDATE()) AS RunningMinutes, 
+    t.text
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.status = 'running'
+  AND DATEDIFF(MINUTE, r.start_time, GETDATE()) > 5;
+
+
+✅ Tip: You can combine these queries into a daily health check stored procedure and schedule it as a SQL Agent Job to email results to DBAs every morning.
+
+
+********************************************************************
  Author:      Mukesh Chaurasia (Sample Script)
  Purpose:     SQL Server Daily Health Check Summary
  Usage:       Run manually or schedule as a SQL Agent Job
