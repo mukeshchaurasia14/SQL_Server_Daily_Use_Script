@@ -1,0 +1,116 @@
+let’s build a stored procedure that runs all the key health check queries, collects the results into a formatted report, and then emails it via Database Mail (using sp_send_dbmail).
+
+This way, you can simply schedule the proc in a SQL Agent Job (e.g., 8 AM daily), and your DBA team gets an automatic email 📧 with the results.
+
+🩺 SQL Server Daily Health Check Stored Procedure
+USE [master];
+GO
+
+IF OBJECT_ID('dbo.usp_SQLServerDailyHealthCheck','P') IS NOT NULL
+    DROP PROCEDURE dbo.usp_SQLServerDailyHealthCheck;
+GO
+
+CREATE PROCEDURE dbo.usp_SQLServerDailyHealthCheck
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Report NVARCHAR(MAX) = N'';
+    DECLARE @CRLF CHAR(2) = CHAR(13)+CHAR(10);
+
+    -------------------------------------------------------------------
+    -- 1. Database State
+    -------------------------------------------------------------------
+    SET @Report += '=== Database State ===' + @CRLF;
+    SELECT @Report += name + ' - ' + state_desc + @CRLF
+    FROM sys.databases;
+
+    -------------------------------------------------------------------
+    -- 2. Backup Status
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Backup Status ===' + @CRLF;
+    SELECT @Report += d.name + ' - Last Backup: ' + 
+           ISNULL(CONVERT(VARCHAR, MAX(b.backup_finish_date), 120), 'No Backup Found') + @CRLF
+    FROM sys.databases d
+    LEFT JOIN msdb.dbo.backupset b ON d.name=b.database_name
+    GROUP BY d.name;
+
+    -------------------------------------------------------------------
+    -- 3. Failed Jobs in Last 24 Hours
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Failed Jobs (Last 24h) ===' + @CRLF;
+    SELECT @Report += j.name + ' failed on ' + CONVERT(VARCHAR, h.run_date) + @CRLF
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobhistory h ON j.job_id = h.job_id
+    WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE()-1, 112))
+      AND h.run_status <> 1;
+
+    -------------------------------------------------------------------
+    -- 4. Disk Space
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Disk Space (MB Free) ===' + @CRLF;
+    CREATE TABLE #disk(dr CHAR(1), FreeMB INT);
+    INSERT INTO #disk EXEC xp_fixeddrives;
+    SELECT @Report += 'Drive ' + dr + ': ' + CAST(FreeMB AS VARCHAR) + ' MB Free' + @CRLF
+    FROM #disk;
+    DROP TABLE #disk;
+
+    -------------------------------------------------------------------
+    -- 5. Blocking Sessions
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Blocking Sessions ===' + @CRLF;
+    SELECT @Report += 'SPID ' + CAST(session_id AS VARCHAR) + 
+                      ' blocked by ' + CAST(blocking_session_id AS VARCHAR) + @CRLF
+    FROM sys.dm_exec_requests
+    WHERE blocking_session_id <> 0;
+
+    -------------------------------------------------------------------
+    -- 6. Error Log (last 20 entries)
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Recent Error Log Entries ===' + @CRLF;
+    CREATE TABLE #errlog (LogDate DATETIME, ProcessInfo NVARCHAR(50), Text NVARCHAR(MAX));
+    INSERT INTO #errlog EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL, N'desc';
+    SELECT TOP 20 @Report += CONVERT(VARCHAR, LogDate, 120) + ' - ' + Text + @CRLF
+    FROM #errlog ORDER BY LogDate DESC;
+    DROP TABLE #errlog;
+
+    -------------------------------------------------------------------
+    -- 7. Long Running Queries
+    -------------------------------------------------------------------
+    SET @Report += @CRLF + '=== Long Running Queries (> 5 min) ===' + @CRLF;
+    SELECT @Report += 'SPID ' + CAST(r.session_id AS VARCHAR) + 
+                      ' running ' + CAST(DATEDIFF(MINUTE, r.start_time, GETDATE()) AS VARCHAR) + ' min' + @CRLF
+    FROM sys.dm_exec_requests r
+    WHERE DATEDIFF(MINUTE, r.start_time, GETDATE()) > 5;
+
+    -------------------------------------------------------------------
+    -- Email the Report
+    -------------------------------------------------------------------
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'DBA_Mail_Profile',   -- 🔧 change to your Database Mail profile
+        @recipients   = 'dba-team@company.com', -- 🔧 change to your DBA email list
+        @subject      = 'SQL Server Daily Health Check',
+        @body         = @Report;
+END
+GO
+
+🚀 How to Deploy & Schedule
+
+Configure Database Mail (if not already done):
+
+EXEC msdb.dbo.sysmail_add_profile_sp 
+     @profile_name = 'DBA_Mail_Profile', 
+     @description = 'SQL Server DBA Alerts';
+
+
+(set SMTP, account, etc. via SSMS wizard)
+
+Deploy the procedure (run the script above in master DB).
+
+Create SQL Agent Job:
+
+Step 1: EXEC dbo.usp_SQLServerDailyHealthCheck;
+
+Schedule: Daily at 8 AM (or as needed).
+
+✅ Result: Every morning your DBA team receives an email report with database status, backups, failed jobs, disk space, errors, and long-running queries.
