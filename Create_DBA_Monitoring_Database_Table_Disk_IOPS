@@ -1,0 +1,165 @@
+Perfect ✅ — I’ll give you a ready-to-run SQL Agent Job script that:
+
+Creates a DBA monitoring database + table.
+
+Inserts Page Life Expectancy (PLE) and disk latency (read/write per database file) every 5 minutes.
+
+Lets you query/report the last few days’ trends.
+
+🔹 Step 1: Create DBA Monitoring Database & Table
+USE master;
+GO
+
+-- Create monitoring DB if not exists
+IF DB_ID('DBA_Monitoring') IS NULL
+    CREATE DATABASE DBA_Monitoring;
+GO
+
+USE DBA_Monitoring;
+GO
+
+-- Table to store PLE + Latency
+IF OBJECT_ID('dbo.PerfPLE_IOStats') IS NOT NULL
+    DROP TABLE dbo.PerfPLE_IOStats;
+GO
+
+CREATE TABLE dbo.PerfPLE_IOStats
+(
+    CaptureTime          DATETIME NOT NULL DEFAULT(GETDATE()),
+    ServerName           SYSNAME,
+    PLESeconds           BIGINT,
+    DatabaseName         SYSNAME,
+    FileLogicalName      SYSNAME,
+    FileType             NVARCHAR(20),
+    PhysicalFileName     NVARCHAR(260),
+    AvgReadLatency_ms    DECIMAL(18,2),
+    AvgWriteLatency_ms   DECIMAL(18,2),
+    NumOfReads           BIGINT,
+    NumOfWrites          BIGINT
+);
+GO
+
+🔹 Step 2: Stored Procedure to Capture Metrics
+USE DBA_Monitoring;
+GO
+
+IF OBJECT_ID('dbo.Capture_PLE_IOStats') IS NOT NULL
+    DROP PROCEDURE dbo.Capture_PLE_IOStats;
+GO
+
+CREATE PROCEDURE dbo.Capture_PLE_IOStats
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @PLE BIGINT;
+
+    -- Get current Page Life Expectancy
+    SELECT @PLE = cntr_value
+    FROM sys.dm_os_performance_counters
+    WHERE counter_name = 'Page life expectancy'
+      AND object_name LIKE '%Buffer Manager%';
+
+    -- Insert PLE + IO stats per file
+    INSERT INTO dbo.PerfPLE_IOStats
+    (
+        CaptureTime, ServerName, PLESeconds,
+        DatabaseName, FileLogicalName, FileType,
+        PhysicalFileName, AvgReadLatency_ms, AvgWriteLatency_ms,
+        NumOfReads, NumOfWrites
+    )
+    SELECT  
+        GETDATE(),
+        @@SERVERNAME,
+        @PLE,
+        DB_NAME(vfs.database_id) AS DatabaseName,
+        mf.name AS FileLogicalName,
+        mf.type_desc AS FileType,
+        mf.physical_name,
+        CASE WHEN vfs.num_of_reads > 0 
+             THEN (1.0 * vfs.io_stall_read_ms / vfs.num_of_reads) ELSE 0 END AS AvgReadLatency_ms,
+        CASE WHEN vfs.num_of_writes > 0 
+             THEN (1.0 * vfs.io_stall_write_ms / vfs.num_of_writes) ELSE 0 END AS AvgWriteLatency_ms,
+        vfs.num_of_reads,
+        vfs.num_of_writes
+    FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+    JOIN sys.master_files mf
+      ON vfs.database_id = mf.database_id
+     AND vfs.file_id = mf.file_id;
+END
+GO
+
+🔹 Step 3: SQL Agent Job (Runs Every 5 Minutes)
+USE msdb;
+GO
+
+DECLARE @job_id UNIQUEIDENTIFIER;
+
+-- Create Job
+EXEC sp_add_job 
+    @job_name = N'Capture PLE and Disk Latency',
+    @enabled = 1,
+    @notify_level_eventlog = 2,
+    @description = N'Captures Page Life Expectancy and Disk Latency every 5 minutes into DBA_Monitoring.PerfPLE_IOStats',
+    @job_id = @job_id OUTPUT;
+
+-- Add Step
+EXEC sp_add_jobstep
+    @job_name = N'Capture PLE and Disk Latency',
+    @step_name = N'Collect Metrics',
+    @subsystem = N'TSQL',
+    @command = N'EXEC DBA_Monitoring.dbo.Capture_PLE_IOStats;',
+    @database_name = N'DBA_Monitoring',
+    @on_success_action = 1,
+    @on_fail_action = 2;
+
+-- Add Schedule (every 5 minutes)
+EXEC sp_add_schedule 
+    @schedule_name = N'Every_5_Minutes',
+    @freq_type = 4,               -- Daily
+    @freq_interval = 1,
+    @freq_subday_type = 4,        -- Minutes
+    @freq_subday_interval = 5,    -- Every 5 minutes
+    @active_start_time = 0;       -- 00:00
+
+-- Attach schedule
+EXEC sp_attach_schedule 
+    @job_name = N'Capture PLE and Disk Latency',
+    @schedule_name = N'Every_5_Minutes';
+
+-- Add Target Server
+EXEC sp_add_jobserver 
+    @job_name = N'Capture PLE and Disk Latency',
+    @server_name = N'(LOCAL)';
+GO
+
+🔹 Step 4: Query Reports
+Last 3 Days – Average PLE (per hour)
+SELECT 
+    DATEADD(hour, DATEDIFF(hour, 0, CaptureTime), 0) AS HourSlot,
+    AVG(PLESeconds) AS AvgPLE
+FROM DBA_Monitoring.dbo.PerfPLE_IOStats
+WHERE CaptureTime >= DATEADD(DAY, -3, GETDATE())
+GROUP BY DATEADD(hour, DATEDIFF(hour, 0, CaptureTime), 0)
+ORDER BY HourSlot;
+
+Last 3 Days – Avg Disk Latency (per database file)
+SELECT 
+    DatabaseName,
+    FileLogicalName,
+    FileType,
+    AVG(AvgReadLatency_ms) AS AvgRead_ms,
+    AVG(AvgWriteLatency_ms) AS AvgWrite_ms
+FROM DBA_Monitoring.dbo.PerfPLE_IOStats
+WHERE CaptureTime >= DATEADD(DAY, -3, GETDATE())
+GROUP BY DatabaseName, FileLogicalName, FileType
+ORDER BY AvgRead_ms DESC;
+
+
+✅ What You Get
+
+Automated job → captures PLE + IO latency every 5 minutes.
+
+Data stored in DBA_Monitoring.PerfPLE_IOStats.
+
+Ready reports for trending analysis over “last few days” (like SCOM performance views).
