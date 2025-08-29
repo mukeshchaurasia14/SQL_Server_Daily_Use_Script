@@ -1,0 +1,111 @@
+to check the PLE (Page Life Expectancy) trend and also review disk latency (read/write delays) for your SQL Server over the last few days, similar to how you’d pull a report from SCOM.
+
+This can be done either via T-SQL DMVs inside SQL Server or via Azure Monitor (if you have configured PLE counters collection).
+
+🔹 Option 1 – Directly from SQL Server (T-SQL Report)
+
+If you want to quickly check PLE and disk latency directly from the SQL Server instance:
+
+1. Check Current Page Life Expectancy
+SELECT 
+    object_name,
+    counter_name,
+    instance_name,
+    cntr_value AS PageLifeExpectancy_seconds
+FROM sys.dm_os_performance_counters
+WHERE counter_name = 'Page life expectancy';
+
+
+Run multiple times during the day to see variation.
+
+PLE < 300 seconds indicates memory pressure.
+
+2. Historical PLE Trend (last few days, captured every minute)
+
+If you are logging perf counters into a DBA custom table (common practice):
+
+SELECT 
+    capture_time,
+    cntr_value AS PageLifeExpectancy_seconds
+FROM DBA_PerfCounters
+WHERE counter_name = 'Page life expectancy'
+  AND capture_time >= DATEADD(DAY, -3, GETDATE())
+ORDER BY capture_time;
+
+
+👉 Replace DBA_PerfCounters with your actual perf counter logging table if you already capture DMV values.
+
+3. Disk Latency (last few days)
+
+Using sys.dm_io_virtual_file_stats:
+
+SELECT 
+    DB_NAME(vfs.database_id) AS DatabaseName,
+    mf.physical_name,
+    vfs.num_of_reads,
+    vfs.io_stall_read_ms,
+    CASE WHEN vfs.num_of_reads > 0 
+         THEN (vfs.io_stall_read_ms / vfs.num_of_reads) 
+         ELSE 0 END AS AvgReadLatency_ms,
+    vfs.num_of_writes,
+    vfs.io_stall_write_ms,
+    CASE WHEN vfs.num_of_writes > 0 
+         THEN (vfs.io_stall_write_ms / vfs.num_of_writes) 
+         ELSE 0 END AS AvgWriteLatency_ms
+FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+JOIN sys.master_files mf
+  ON vfs.database_id = mf.database_id 
+ AND vfs.file_id = mf.file_id
+ORDER BY AvgReadLatency_ms DESC;
+
+
+AvgReadLatency_ms > 20ms or AvgWriteLatency_ms > 20ms = storage slowness.
+
+Run daily and log into a DBA table for trend analysis.
+
+🔹 Option 2 – From Azure Monitor (if AMA/DCR configured)
+
+If you already configured Azure Monitor Agent with Data Collection Rule (DCR) for PLE and disk metrics:
+
+Go to Azure Monitor → Metrics.
+
+Scope = your SQL VM.
+
+Metric = SQLServer:Buffer Manager → Page life expectancy.
+
+Chart: Line chart, last 3 days.
+
+Metric = LogicalDisk → Avg. Disk sec/Read and Avg. Disk sec/Write.
+
+Chart: Line chart, last 3 days.
+
+👉 You’ll get a continuous trend (similar to SCOM performance views).
+
+🔹 Option 3 – Log Analytics (if data is sent there)
+
+If you’re forwarding performance counters to Log Analytics workspace, run KQL queries:
+
+PLE last 3 days
+Perf
+| where ObjectName == "SQLServer:Buffer Manager"
+| where CounterName == "Page life expectancy"
+| where TimeGenerated >= ago(3d)
+| summarize AvgPLE = avg(CounterValue) by bin(TimeGenerated, 1h), Computer
+| order by TimeGenerated
+
+Disk Latency last 3 days
+Perf
+| where ObjectName == "LogicalDisk"
+| where CounterName in ("Avg. Disk sec/Read", "Avg. Disk sec/Write")
+| where TimeGenerated >= ago(3d)
+| summarize AvgLatency = avg(CounterValue) by bin(TimeGenerated, 1h), CounterName, InstanceName, Computer
+| order by TimeGenerated
+
+
+✅ Summary for You:
+
+Use T-SQL DMVs if you want an immediate on-server check (good for DBAs).
+
+Use Azure Monitor Metrics Explorer if you’ve already set up counters (good for dashboards).
+
+Use Log Analytics KQL if you want historical trending and correlation (good for reports).
